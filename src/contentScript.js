@@ -198,17 +198,36 @@
 
     let hasQueuesTable = false;
     let loginPage = false;
+    let diagKind = 'NONE';
+    let doc = null;
+    let bodyText = '';
     try {
-      const doc = iframe.contentDocument;
+      doc = iframe.contentDocument;
       if (doc) {
         hasQueuesTable = !!doc.querySelector('table.queues');
         loginPage = looksLikeLoginPageFromDoc(doc);
+        bodyText = (doc.body && doc.body.textContent) ? doc.body.textContent : '';
+        if (!loginPage && !hasQueuesTable) {
+          diagKind = classify403(bodyText, { location: '' });
+        }
       }
     } catch (e) {
       // Ignore iframe access errors
     }
 
-    return { ok: loaded && !loginPage, mode: 'native', hasQueuesTable, loginPage, reason: loaded ? 'loaded' : 'timeout' };
+    const ok = loaded && !loginPage && hasQueuesTable;
+    const forbidden = !ok && loaded && !loginPage && !hasQueuesTable;
+    return {
+      ok,
+      mode: 'native',
+      hasQueuesTable,
+      loginPage,
+      reason: loaded ? 'loaded' : 'timeout',
+      doc,
+      diagKind: forbidden ? diagKind : 'NONE',
+      forbidden,
+      bodyText,
+    };
   }
 
   function looksLikeLoginPageFromText(htmlText) {
@@ -908,6 +927,7 @@
         `[native] ${effectiveActionType} ${queueName} mode=${nativeRes.mode} reason=${nativeRes.reason} hasQueuesTable=${nativeRes.hasQueuesTable}`
       );
       if (currentRun) {
+        const nativeStatus = nativeRes.forbidden ? 403 : (nativeRes.ok ? 200 : 0);
         currentRun.submissions.push({
           ts: new Date().toISOString(),
           queueName,
@@ -923,10 +943,11 @@
             },
           },
           response: {
-            status: nativeRes.ok ? 200 : 0,
+            status: nativeStatus,
             loginPage: nativeRes.loginPage || false,
             hasQueuesTable: nativeRes.hasQueuesTable || false,
             reason: nativeRes.reason,
+            diagKind: nativeRes.diagKind || 'NONE',
           },
         });
       }
@@ -934,7 +955,28 @@
         return { ok: false, status: 200, is403: false, bodySnippet: '', loginPage: true, diagKind: 'LOGIN', hasQueuesTable: nativeRes.hasQueuesTable };
       }
       if (nativeRes.ok) {
-        return { ok: true, status: 200, is403: false, bodySnippet: '', loginPage: false, diagKind: 'NONE', hasQueuesTable: nativeRes.hasQueuesTable };
+        return {
+          ok: true,
+          status: 200,
+          is403: false,
+          bodySnippet: '',
+          loginPage: false,
+          diagKind: 'NONE',
+          hasQueuesTable: nativeRes.hasQueuesTable,
+          freshDoc: nativeRes.doc,
+          freshDocSource: 'iframe',
+        };
+      }
+      if (nativeRes.forbidden) {
+        return {
+          ok: false,
+          status: 403,
+          is403: true,
+          bodySnippet: nativeRes.bodyText ? redactSecrets(nativeRes.bodyText).slice(0, 200) : '',
+          loginPage: false,
+          diagKind: nativeRes.diagKind || 'UNKNOWN',
+          hasQueuesTable: nativeRes.hasQueuesTable,
+        };
       }
     } else if (!effectiveActionType) {
       logVerbose(`[native] skip ${queueName} missing actionType`);
@@ -1144,6 +1186,18 @@
             results.totalProcessed++;
             logVerbose(`✓ ${actionType} ${queueInfo.queueName}`);
             alreadySucceededKeys.add(queueInfo.actionPathKey);
+
+            if (result.freshDoc) {
+              const updated = getHeaderCsrfTokenExtended(result.freshDoc, null, null);
+              if (updated.token !== csrfContext.headerToken) {
+                csrfContext.headerToken = updated.token;
+                csrfContext.tokenSource = updated.source;
+                results.stats.headerCsrfSource = updated.source;
+              }
+              actionable = getActionableQueues(result.freshDoc, actionType, false)
+                .filter(q => !alreadySucceededKeys.has(q.actionPathKey));
+              i = -1;
+            }
           } else if (result.is403) {
             results.stats.initial403Count++;
             last403At = Date.now();
