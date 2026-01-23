@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2025-01-23
+
+### Changed
+- Switched to "form mode" CSRF (removed `X-Requested-With: XMLHttpRequest` header) to reduce 403s
+- Per-pass token refresh strategy replaces per-queue refresh (max 1 refresh per pass)
+- Broadened CSRF token discovery: tries `meta[name="csrf-token"]` first, then any `input[name="authenticity_token"]`
+
+### Added
+- `CSRF_REQUEST_MODE` constant for form vs xhr mode control
+- `resolveHeaderCsrfToken(doc)` helper for multi-source token discovery
+- `buildQueueTokenMap(doc, actionType)` for efficient per-pass token refresh
+- Enhanced stats logging: `initial403Count`, `retrySuccessCount`, `tokenRefreshCount`
+
+### Fixed
+- Reduced initial 403 errors by mimicking browser form submission behavior
+- Eliminated redundant per-queue page fetches on 403 retry
+
+### Improved
+- Logging now shows token source (`meta` vs `hidden_input`) and CSRF request mode
+- Better diagnostics for debugging token-related issues
+
 ## [1.0.5] - 2025-01-23
 
 ### Fixed

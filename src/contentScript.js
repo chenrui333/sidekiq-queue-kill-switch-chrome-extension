@@ -7,6 +7,11 @@
  * Uses a convergence loop to handle Sidekiq UI eventual consistency:
  * - After each pass, re-fetches page state to verify which queues still need action
  * - Retries until all queues reach desired state or max passes reached
+ *
+ * CSRF Strategy:
+ * - Uses "form" mode by default (no X-Requested-With header) to avoid XHR CSRF rotation issues
+ * - Discovers CSRF token from multiple sources (meta tag, hidden inputs)
+ * - Refreshes tokens at most once per pass (not per queue) to reduce server load
  */
 
 (function() {
@@ -14,6 +19,10 @@
 
   const LOG_PREFIX = '[SQKS]';
   const MAX_PASSES = 5;           // Maximum convergence attempts
+
+  // CSRF request mode: 'form' avoids XHR-specific CSRF issues, 'xhr' uses traditional headers
+  const CSRF_REQUEST_MODE = 'form';
+  const MAX_TOKEN_REFRESH_PER_PASS = 1;
 
   // Jittered delays for human-like behavior
   const POST_DELAY_MIN_MS = 250;      // Min delay between individual POST requests
@@ -106,14 +115,26 @@
   }
 
   /**
-   * Get the CSRF token from the page's meta tag
-   * Rails uses this for X-CSRF-Token header validation
-   * @param {Document} doc - Document to search (live DOM or parsed)
-   * @returns {string|null} Meta CSRF token or null if not found
+   * Resolve CSRF header token from multiple sources (priority order)
+   * Sidekiq Enterprise may not have meta[name="csrf-token"], so we try alternatives
+   * @param {Document} doc - Document to search
+   * @returns {{ token: string|null, source: string }}
    */
-  function getMetaCsrfToken(doc) {
+  function resolveHeaderCsrfToken(doc) {
+    // 1. Standard Rails meta tag (preferred)
     const meta = doc.querySelector('meta[name="csrf-token"]');
-    return meta ? meta.getAttribute('content') : null;
+    if (meta && meta.getAttribute('content')) {
+      return { token: meta.getAttribute('content'), source: 'meta' };
+    }
+
+    // 2. Any hidden authenticity_token input on the page (common in Sidekiq)
+    const anyHidden = doc.querySelector('input[name="authenticity_token"]');
+    if (anyHidden && anyHidden.value) {
+      return { token: anyHidden.value, source: 'hidden_input' };
+    }
+
+    // 3. No token found
+    return { token: null, source: 'none' };
   }
 
   /**
@@ -190,7 +211,6 @@
   /**
    * Get actionable queue forms from a document (live DOM or fetched)
    * Returns array of queue info objects for queues that still need the specified action
-   * Each object includes both formToken (for body) and headerToken (for X-CSRF-Token header)
    */
   function getActionableQueues(doc, actionType, verbose = false) {
     const table = doc.querySelector('table.queues');
@@ -201,12 +221,6 @@
 
     const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
     const actionable = [];
-
-    // Get meta CSRF token once for the document (used for X-CSRF-Token header)
-    const metaCsrfToken = getMetaCsrfToken(doc);
-    if (verbose) {
-      log(`Meta CSRF token found: ${!!metaCsrfToken}`);
-    }
 
     // Counters for observability
     let formsWithDelete = 0;
@@ -264,7 +278,6 @@
         action,
         actionPathKey: action, // Used to re-find form after page refetch
         formToken,             // For POST body authenticity_token param
-        headerToken: metaCsrfToken || formToken, // For X-CSRF-Token header (prefer meta)
         submitName,
         submitValue: submitValue || submitName, // Fallback to name if value missing
       });
@@ -281,34 +294,74 @@
   }
 
   /**
-   * Build headers that mimic a real browser form submission for Rails CSRF
-   * @param {string} headerToken - The CSRF token for X-CSRF-Token header (prefer meta tag token)
+   * Build a map of actionPathKey -> queue info from a document
+   * Used to update tokens for remaining queues after a refresh
+   */
+  function buildQueueTokenMap(doc, actionType) {
+    const actionable = getActionableQueues(doc, actionType, false);
+    const map = new Map();
+    for (const q of actionable) {
+      map.set(q.actionPathKey, q);
+    }
+    return map;
+  }
+
+  /**
+   * Build headers for form submission
+   * In 'form' mode: minimal headers like a browser form submit (no XHR markers)
+   * In 'xhr' mode: traditional Rails XHR headers
+   * @param {string} mode - 'form' or 'xhr'
+   * @param {string|null} headerToken - CSRF token for header (only used in xhr mode or if from meta)
+   * @param {string} tokenSource - Where the token came from ('meta', 'hidden_input', 'none')
    * @returns {Object} Headers object for fetch
    */
-  function buildRailsHeaders(headerToken) {
-    return {
+  function buildRailsHeaders(mode, headerToken, tokenSource) {
+    const headers = {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'X-CSRF-Token': headerToken,
-      'X-Requested-With': 'XMLHttpRequest',
+      'Cache-Control': 'no-cache',
     };
+
+    if (mode === 'xhr') {
+      // Traditional XHR mode - include all headers
+      headers['X-Requested-With'] = 'XMLHttpRequest';
+      if (headerToken) {
+        headers['X-CSRF-Token'] = headerToken;
+      }
+    } else {
+      // Form mode - only include X-CSRF-Token if from meta (reliable source)
+      // Hidden input tokens may be masked/per-form and cause mismatches in header
+      if (headerToken && tokenSource === 'meta') {
+        headers['X-CSRF-Token'] = headerToken;
+      }
+    }
+
+    return headers;
   }
 
   /**
    * Perform a single POST request for a queue action
+   * @param {URL} url - Target URL
+   * @param {string} formToken - Token for POST body
+   * @param {string} submitName - Form field name
+   * @param {string} submitValue - Form field value
+   * @param {Object} csrfContext - { headerToken, tokenSource, mode }
+   * @param {string} attemptLabel - Label for logging
    * @returns {Object} { ok, status, statusText, bodySnippet, headers }
    */
-  async function doQueuePost(url, formToken, headerToken, submitName, submitValue, attemptLabel) {
+  async function doQueuePost(url, formToken, submitName, submitValue, csrfContext, attemptLabel) {
     // Build POST body with form token (as browser would send)
     const body = new URLSearchParams();
     body.append('authenticity_token', formToken);
     body.append(submitName, submitValue);
 
-    log(`[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue}`);
+    const headers = buildRailsHeaders(csrfContext.mode, csrfContext.headerToken, csrfContext.tokenSource);
+
+    log(`[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue} (mode=${csrfContext.mode}, tokenSrc=${csrfContext.tokenSource})`);
 
     const response = await fetch(url.toString(), {
       method: 'POST',
-      headers: buildRailsHeaders(headerToken), // Use meta/header token for X-CSRF-Token
+      headers,
       body: body.toString(),
       credentials: 'include',
       redirect: 'follow',
@@ -318,7 +371,7 @@
 
     // Extract debug info
     let bodySnippet = '';
-    const headers = {
+    const respHeaders = {
       contentType: response.headers.get('content-type'),
       location: response.headers.get('location'),
       xRequestId: response.headers.get('x-request-id'),
@@ -336,15 +389,15 @@
       }
     }
 
-    return { ok, status: response.status, statusText: response.statusText, bodySnippet, headers };
+    return { ok, status: response.status, statusText: response.statusText, bodySnippet, headers: respHeaders };
   }
 
   /**
-   * Submit an action for a single queue with 403 retry logic
-   * On 403, refreshes CSRF tokens from fresh page fetch and retries once
+   * Submit an action for a single queue
+   * Returns { ok, status, is403 } - caller handles refresh logic
    */
-  async function submitQueueAction(queueInfo) {
-    const { queueName, action, actionPathKey, formToken, headerToken, submitName, submitValue } = queueInfo;
+  async function submitQueueAction(queueInfo, csrfContext) {
+    const { queueName, action, formToken, submitName, submitValue } = queueInfo;
     const url = new URL(action, window.location.origin);
 
     // SAFETY: Final guard against delete
@@ -352,68 +405,21 @@
       throw new Error('SAFETY: Refusing to submit delete action');
     }
 
-    log(`Queue "${queueName}": formToken=${formToken?.substring(0, 8)}..., headerToken=${headerToken?.substring(0, 8)}...`);
+    const res = await doQueuePost(url, formToken, submitName, submitValue, csrfContext, 'attempt');
 
-    // Initial attempt
-    let res = await doQueuePost(url, formToken, headerToken, submitName, submitValue, 'initial');
-
-    // Handle 403 with CSRF token refresh retry
-    if (res.status === 403) {
-      logError(`403 Forbidden for "${queueName}" on initial attempt`);
-      logError(`  Response: ${res.bodySnippet || 'Forbidden'}`);
+    if (!res.ok && res.status !== 403) {
+      logError(`HTTP ${res.status} for "${queueName}": ${res.bodySnippet}`);
       logError(`  Headers:`, res.headers);
-      log(`Refreshing CSRF tokens and retrying once...`);
-
-      try {
-        const freshDoc = await fetchQueuesPageDocument();
-        const freshHeaderToken = getMetaCsrfToken(freshDoc);
-
-        // Re-locate the form by action path
-        let form = freshDoc.querySelector(`form[action="${actionPathKey}"]`);
-        if (!form) {
-          // Try partial match if exact fails
-          form = freshDoc.querySelector(`form[action*="${actionPathKey}"]`);
-        }
-
-        const freshFormToken = form ? getAuthenticityToken(form) : null;
-
-        log(`Token refresh: freshMeta=${!!freshHeaderToken}, freshForm=${!!freshFormToken}`);
-
-        if (!freshFormToken) {
-          logError(`Could not refresh form token for "${queueName}"; using original + fresh meta`);
-        }
-
-        const retryFormToken = freshFormToken || formToken;
-        const retryHeaderToken = freshHeaderToken || retryFormToken;
-
-        res = await doQueuePost(url, retryFormToken, retryHeaderToken, submitName, submitValue, 'retry');
-
-        if (res.status === 403) {
-          logError(`403 persists after CSRF refresh for "${queueName}" - likely permission/RBAC issue`);
-          logError(`  Response: ${res.bodySnippet || 'Forbidden'}`);
-          throw new Error(`HTTP 403 after CSRF refresh (likely permission/RBAC). Body: ${res.bodySnippet || 'Forbidden'}`);
-        }
-      } catch (refreshError) {
-        if (refreshError.message.includes('HTTP 403 after CSRF refresh')) {
-          throw refreshError;
-        }
-        logError(`Failed to refresh tokens for "${queueName}":`, refreshError);
-        throw new Error(`HTTP 403 and token refresh failed: ${refreshError.message}`);
-      }
     }
 
-    if (!res.ok) {
-      logError(`Response body (first 200 chars):`, res.bodySnippet);
-      logError(`Response headers:`, res.headers);
-      throw new Error(`HTTP ${res.status}: ${res.statusText}${res.bodySnippet ? ` - ${res.bodySnippet}` : ''}`);
-    }
-
-    return true;
+    return { ok: res.ok, status: res.status, is403: res.status === 403, bodySnippet: res.bodySnippet };
   }
 
   /**
    * Convergence loop: keep processing until all queues reach desired state
    * or max passes reached
+   *
+   * Token refresh strategy: refresh at most once per pass when 403 detected
    */
   async function convergeQueues(actionType, updateStatus) {
     const results = {
@@ -422,6 +428,11 @@
       success: false,
       errors: [],
       remainingQueues: [],
+      stats: {
+        initial403Count: 0,
+        retrySuccessCount: 0,
+        tokenRefreshCount: 0,
+      },
     };
 
     const actionLabel = actionType === 'pause' ? 'Pausing' : 'Unpausing';
@@ -442,13 +453,22 @@
           doc = await fetchQueuesPageDocument();
         } catch (error) {
           logError(`Failed to fetch page state:`, error);
-          // Fall back to live DOM
           doc = document;
         }
       }
 
+      // Resolve CSRF context once per pass
+      const { token: headerToken, source: tokenSource } = resolveHeaderCsrfToken(doc);
+      const csrfContext = {
+        headerToken,
+        tokenSource,
+        mode: CSRF_REQUEST_MODE,
+      };
+
+      log(`Pass ${pass} CSRF: mode=${csrfContext.mode}, tokenSource=${tokenSource}, hasToken=${!!headerToken}`);
+
       // Get queues that still need action (verbose logging on first pass)
-      const actionable = getActionableQueues(doc, actionType, pass === 1);
+      let actionable = getActionableQueues(doc, actionType, pass === 1);
 
       if (actionable.length === 0) {
         log(`Pass ${pass}/${MAX_PASSES}: All queues ${doneLabel}!`);
@@ -461,20 +481,117 @@
       log(`Pass ${pass}/${MAX_PASSES}: ${actionable.length} queues need ${actionType}`);
       updateStatus(`Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${actionable.length} remaining...`);
 
+      // Track token refresh state for this pass
+      let tokenRefreshCount = 0;
+      let csrfNeedsRefresh = false;
+
       // Process each actionable queue
       for (let i = 0; i < actionable.length; i++) {
+        // Check if we need to refresh tokens before this queue
+        if (csrfNeedsRefresh && tokenRefreshCount < MAX_TOKEN_REFRESH_PER_PASS) {
+          log(`Refreshing tokens mid-pass (after 403)...`);
+          try {
+            const freshDoc = await fetchQueuesPageDocument();
+            const { token: freshHeaderToken, source: freshSource } = resolveHeaderCsrfToken(freshDoc);
+            csrfContext.headerToken = freshHeaderToken;
+            csrfContext.tokenSource = freshSource;
+
+            // Update remaining queue tokens from fresh doc
+            const freshMap = buildQueueTokenMap(freshDoc, actionType);
+            for (let j = i; j < actionable.length; j++) {
+              const fresh = freshMap.get(actionable[j].actionPathKey);
+              if (fresh) {
+                actionable[j].formToken = fresh.formToken;
+              }
+            }
+
+            tokenRefreshCount++;
+            results.stats.tokenRefreshCount++;
+            csrfNeedsRefresh = false;
+            log(`Token refresh complete: source=${freshSource}, hasToken=${!!freshHeaderToken}`);
+          } catch (err) {
+            logError(`Token refresh failed:`, err);
+          }
+        }
+
         const queueInfo = actionable[i];
         const progressMsg = `Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${i + 1}/${actionable.length} (${queueInfo.queueName})`;
         updateStatus(progressMsg);
 
         try {
-          await submitQueueAction(queueInfo);
-          results.totalProcessed++;
-          log(`Success: ${actionType} ${queueInfo.queueName}`);
+          const result = await submitQueueAction(queueInfo, csrfContext);
+
+          if (result.ok) {
+            results.totalProcessed++;
+            log(`✓ ${actionType} ${queueInfo.queueName}`);
+          } else if (result.is403) {
+            results.stats.initial403Count++;
+            logError(`403 for "${queueInfo.queueName}" - will retry after token refresh`);
+
+            // Mark for refresh, but don't refetch immediately for every queue
+            csrfNeedsRefresh = true;
+
+            // If we haven't refreshed yet this pass, do it now and retry this queue
+            if (tokenRefreshCount < MAX_TOKEN_REFRESH_PER_PASS) {
+              log(`Immediate token refresh for retry...`);
+              try {
+                const freshDoc = await fetchQueuesPageDocument();
+                const { token: freshHeaderToken, source: freshSource } = resolveHeaderCsrfToken(freshDoc);
+                csrfContext.headerToken = freshHeaderToken;
+                csrfContext.tokenSource = freshSource;
+
+                // Update this queue's form token
+                const freshMap = buildQueueTokenMap(freshDoc, actionType);
+                const fresh = freshMap.get(queueInfo.actionPathKey);
+                if (fresh) {
+                  queueInfo.formToken = fresh.formToken;
+                }
+
+                // Update remaining queues too
+                for (let j = i + 1; j < actionable.length; j++) {
+                  const f = freshMap.get(actionable[j].actionPathKey);
+                  if (f) {
+                    actionable[j].formToken = f.formToken;
+                  }
+                }
+
+                tokenRefreshCount++;
+                results.stats.tokenRefreshCount++;
+                csrfNeedsRefresh = false;
+
+                // Retry this queue with fresh tokens
+                const retryResult = await submitQueueAction(queueInfo, csrfContext);
+                if (retryResult.ok) {
+                  results.totalProcessed++;
+                  results.stats.retrySuccessCount++;
+                  log(`✓ ${actionType} ${queueInfo.queueName} (after refresh)`);
+                } else {
+                  results.errors.push({
+                    queue: queueInfo.queueName,
+                    error: `HTTP ${retryResult.status} after token refresh (likely RBAC)`,
+                    pass
+                  });
+                  logError(`Failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
+                }
+              } catch (refreshErr) {
+                results.errors.push({ queue: queueInfo.queueName, error: `403 + refresh failed: ${refreshErr.message}`, pass });
+                logError(`Refresh failed for ${queueInfo.queueName}:`, refreshErr);
+              }
+            } else {
+              // Already refreshed max times this pass, record as error
+              results.errors.push({
+                queue: queueInfo.queueName,
+                error: `HTTP 403 (max refreshes reached this pass)`,
+                pass
+              });
+            }
+          } else {
+            results.errors.push({ queue: queueInfo.queueName, error: `HTTP ${result.status}`, pass });
+            logError(`Failed: ${queueInfo.queueName} - HTTP ${result.status}`);
+          }
         } catch (error) {
           results.errors.push({ queue: queueInfo.queueName, error: String(error.message || error), pass });
-          logError(`Failed to ${actionType} ${queueInfo.queueName}:`, error);
-          // Backoff after errors
+          logError(`Error processing ${queueInfo.queueName}:`, error);
           await sleepJitter(ERROR_BACKOFF_MIN_MS, ERROR_BACKOFF_MAX_MS);
         }
 
@@ -484,7 +601,7 @@
         }
       }
 
-      // If not the last pass, wait with jitter for server state to settle before re-checking
+      // If not the last pass, wait with jitter for server state to settle
       if (pass < MAX_PASSES) {
         log(`Waiting for server state to settle...`);
         await sleepJitter(PASS_DELAY_MIN_MS, PASS_DELAY_MAX_MS);
@@ -509,6 +626,9 @@
         logError('Failed to perform final state check:', error);
       }
     }
+
+    // Log summary stats
+    log(`Stats: initial403=${results.stats.initial403Count}, retrySuccess=${results.stats.retrySuccessCount}, tokenRefreshes=${results.stats.tokenRefreshCount}`);
 
     return results;
   }
