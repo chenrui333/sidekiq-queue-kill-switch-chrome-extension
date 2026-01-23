@@ -20,6 +20,7 @@
   'use strict';
 
   const LOG_PREFIX = '[SQKS]';
+  const DEBUG_LEVEL = 2; // 0=quiet, 1=summary/errors, 2=verbose per-queue
   const MAX_PASSES = 5;           // Maximum convergence attempts
   const MAX_TOKEN_REFRESH_PER_PASS = 1;
 
@@ -30,9 +31,27 @@
   const PASS_DELAY_MAX_MS = 3500;     // Max delay between passes
   const ERROR_BACKOFF_MIN_MS = 2000;  // Min backoff after errors
   const ERROR_BACKOFF_MAX_MS = 4000;  // Max backoff after errors
+  const RECENT_403_WINDOW_MS = 2000;
+  const RECENT_403_EXTRA_DELAY_MIN_MS = 1200;
+  const RECENT_403_EXTRA_DELAY_MAX_MS = 1800;
+  const LIVE_DOM_RECHECK_INTERVAL = 4;
+  const ENABLE_LIVE_DOM_RECHECK = true;
+  const REQUEST_MODE = 'xhr';
+  const REQUEST_CREDENTIALS = 'include';
+  const REQUEST_REDIRECT = 'manual';
 
   // Allowed action types - explicit allowlist for safety
   const ALLOWED_ACTIONS = ['pause', 'unpause'];
+  const LOGIN_MARKERS = [
+    'type="password"',
+    'name="password"',
+    'action="/users/sign_in"',
+    'action="/login"',
+    'sign in',
+    'log in',
+  ];
+
+  let bulkActionInProgress = false;
 
   /**
    * Sleep helper
@@ -60,11 +79,62 @@
    * Log helper with consistent prefix
    */
   function log(...args) {
-    console.log(LOG_PREFIX, ...args);
+    if (DEBUG_LEVEL >= 1) {
+      console.log(LOG_PREFIX, ...args);
+    }
+  }
+
+  function logVerbose(...args) {
+    if (DEBUG_LEVEL >= 2) {
+      console.log(LOG_PREFIX, ...args);
+    }
   }
 
   function logError(...args) {
-    console.error(LOG_PREFIX, ...args);
+    if (DEBUG_LEVEL >= 1) {
+      console.error(LOG_PREFIX, ...args);
+    }
+  }
+
+  function tokenPrefix(token) {
+    if (!token) return 'missing';
+    return token.slice(0, 8);
+  }
+
+  function normalizeActionPathKey(action) {
+    try {
+      const url = new URL(action, window.location.origin);
+      return `${url.pathname}${url.search}`;
+    } catch (e) {
+      return action;
+    }
+  }
+
+  function looksLikeLoginPageFromText(htmlText) {
+    if (!htmlText) return false;
+    const lower = htmlText.toLowerCase();
+    return LOGIN_MARKERS.some(marker => lower.includes(marker));
+  }
+
+  function looksLikeLoginPageFromDoc(doc) {
+    if (!doc) return false;
+    if (doc.querySelector('input[type="password"]')) return true;
+    const loginForm = doc.querySelector('form[action*="login"], form[action*="sign_in"]');
+    if (loginForm) return true;
+    const title = doc.querySelector('title');
+    if (title && looksLikeLoginPageFromText(title.textContent || '')) return true;
+    return false;
+  }
+
+  function redactSecrets(text) {
+    if (!text) return '';
+    let redacted = text;
+    redacted = redacted.replace(/(authenticity_token[^"']*value=["'])([^"']+)/gi, '$1[REDACTED]');
+    redacted = redacted.replace(/(csrf-token["']?\s+content=["'])([^"']+)/gi, '$1[REDACTED]');
+    redacted = redacted.replace(/(csrfToken\s*[:=]\s*["'])([^"']+)/gi, '$1[REDACTED]');
+    redacted = redacted.replace(/(window\._csrf\s*=\s*["'])([^"']+)/gi, '$1[REDACTED]');
+    redacted = redacted.replace(/(window\.csrfToken\s*=\s*["'])([^"']+)/gi, '$1[REDACTED]');
+    return redacted;
   }
 
   /**
@@ -221,22 +291,31 @@
    * Fetch the queues page and parse it into a document
    * Returns a parsed Document for querying fresh DOM state
    */
-  async function fetchQueuesPageDocument() {
+  async function fetchQueuesPageDocument(contextLabel = 'refresh') {
     const response = await fetch(window.location.href, {
       method: 'GET',
-      credentials: 'include',
+      credentials: REQUEST_CREDENTIALS,
       headers: {
         'Accept': 'text/html',
       },
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch page: HTTP ${response.status}`);
-    }
-
     const html = await response.text();
     const parser = new DOMParser();
-    return parser.parseFromString(html, 'text/html');
+    const doc = parser.parseFromString(html, 'text/html');
+    const loginPage = looksLikeLoginPageFromDoc(doc) || looksLikeLoginPageFromText(html);
+    const hasQueuesTable = !!doc.querySelector('table.queues');
+    const { token: headerToken, source: tokenSource } = getHeaderCsrfToken(doc);
+
+    log(
+      `[${contextLabel}] GET status=${response.status} loginPage=${loginPage} table.queues=${hasQueuesTable}`,
+      `headerCsrf=${tokenSource}:${tokenPrefix(headerToken)}`
+    );
+    if (!response.ok) {
+      logError(`[${contextLabel}] GET non-OK status=${response.status}`);
+    }
+
+    return { doc, loginPage, status: response.status, ok: response.ok };
   }
 
   /**
@@ -246,7 +325,7 @@
   function getActionableQueues(doc, actionType, verbose = false) {
     const table = doc.querySelector('table.queues');
     if (!table) {
-      if (verbose) log('No table.queues found in document');
+      if (verbose) logVerbose('No table.queues found in document');
       return [];
     }
 
@@ -301,13 +380,13 @@
 
       // Log the exact name=value pair we'll submit (helps debugging)
       if (verbose) {
-        log(`  Queue "${queueName}": will submit ${submitName}=${submitValue}`);
+        logVerbose(`  Queue "${queueName}": will submit ${submitName}=${submitValue}`);
       }
 
       actionable.push({
         queueName,
         action,
-        actionPathKey: action, // Used to re-find form after page refetch
+        actionPathKey: normalizeActionPathKey(action), // Used to re-find form after page refetch
         formToken,             // For POST body authenticity_token param
         submitName,
         submitValue: submitValue || submitName, // Fallback to name if value missing
@@ -315,10 +394,10 @@
     }
 
     if (verbose) {
-      log(`Enumeration: ${forms.length} total forms, ${actionable.length} actionable for "${actionType}"`);
-      log(`  - Already in desired state: ${formsNoMatchingAction}`);
-      log(`  - Delete-only forms: ${formsWithDelete}`);
-      log(`  - Missing token: ${formsNoToken}`);
+      logVerbose(`Enumeration: ${forms.length} total forms, ${actionable.length} actionable for "${actionType}"`);
+      logVerbose(`  - Already in desired state: ${formsNoMatchingAction}`);
+      logVerbose(`  - Delete-only forms: ${formsWithDelete}`);
+      logVerbose(`  - Missing token: ${formsNoToken}`);
     }
 
     return actionable;
@@ -345,8 +424,8 @@
    */
   function buildRailsHeaders(headerCsrfToken) {
     const headers = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'Accept': 'text/html, */*;q=0.1',
       'Cache-Control': 'no-cache',
       'X-Requested-With': 'XMLHttpRequest', // Rails expects this for AJAX requests
     };
@@ -363,6 +442,7 @@
       // Origin header restricted, proceed without
     }
 
+    // Some headers (like Referer) are forbidden to set; rely on fetch referrer.
     return headers;
   }
 
@@ -376,7 +456,7 @@
    * @param {string} submitValue - Form field value
    * @param {Object} csrfContext - { headerToken, tokenSource }
    * @param {string} attemptLabel - Label for logging
-   * @returns {Object} { ok, status, is403, bodySnippet, headers }
+   * @returns {Object} { ok, status, is403, bodySnippet, headers, loginPage }
    */
   async function doQueuePost(url, formToken, submitName, submitValue, csrfContext, attemptLabel) {
     // Build POST body with form token (as browser would send)
@@ -385,8 +465,17 @@
     body.append(submitName, submitValue);
 
     const headers = buildRailsHeaders(csrfContext.headerToken);
+    const headerTokenPrefix = tokenPrefix(csrfContext.headerToken);
+    const bodyTokenPrefix = tokenPrefix(formToken);
+    const referrer = window.location.href;
 
-    log(`[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue} (headerCsrf=${csrfContext.tokenSource})`);
+    logVerbose(
+      `[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue}`,
+      `(bodyToken=${bodyTokenPrefix}, headerToken=${headerTokenPrefix}, headerSource=${csrfContext.tokenSource})`
+    );
+    logVerbose(
+      `[${attemptLabel}] req mode=${REQUEST_MODE}, credentials=${REQUEST_CREDENTIALS}, referrer=${referrer}, redirect=${REQUEST_REDIRECT}`
+    );
 
     let response;
     try {
@@ -394,14 +483,14 @@
         method: 'POST',
         headers,
         body: body.toString(),
-        credentials: 'include',
-        redirect: 'manual', // Important: detect 302 as success signal
-        referrer: window.location.href,
+        credentials: REQUEST_CREDENTIALS,
+        redirect: REQUEST_REDIRECT, // Important: detect 302 as success signal
+        referrer,
         referrerPolicy: 'strict-origin-when-cross-origin',
       });
     } catch (fetchError) {
       logError(`Fetch error for ${url.pathname}:`, fetchError);
-      return { ok: false, status: 0, is403: false, bodySnippet: fetchError.message, headers: {} };
+      return { ok: false, status: 0, is403: false, bodySnippet: fetchError.message, headers: {}, loginPage: false };
     }
 
     // Extract response metadata for diagnostics
@@ -412,25 +501,55 @@
       setCookie: response.headers.get('set-cookie') ? 'present' : 'absent',
     };
 
-    // Success conditions:
-    // - 302/303 redirect (Rails typical success) with redirect: 'manual' gives type: 'opaqueredirect'
-    // - 200 OK (some configurations)
-    // - response.type === 'opaqueredirect' indicates a redirect was intercepted
-    const isRedirect = response.type === 'opaqueredirect' || response.status === 302 || response.status === 303;
-    const ok = response.ok || isRedirect;
-    const is403 = response.status === 403;
-
     let bodySnippet = '';
-    if (!ok && response.body) {
+    let loginPage = false;
+    let bodyText = '';
+    const isHtml = (respHeaders.contentType || '').includes('text/html');
+
+    const shouldReadBody = response.type !== 'opaqueredirect'
+      && (isHtml || response.status >= 400 || (response.status >= 200 && response.status < 300));
+
+    if (shouldReadBody) {
       try {
-        const text = await response.text();
-        bodySnippet = text.substring(0, 200);
+        bodyText = await response.text();
+        if (isHtml) {
+          loginPage = looksLikeLoginPageFromText(bodyText);
+        }
       } catch (e) {
         // Ignore read errors
       }
     }
 
-    return { ok, status: response.status, is403, bodySnippet, headers: respHeaders };
+    const redirectIsSafe = (() => {
+      if (!respHeaders.location) return false;
+      try {
+        const redirectUrl = new URL(respHeaders.location, window.location.origin);
+        return redirectUrl.origin === window.location.origin || redirectUrl.pathname.startsWith('/sidekiq/queues');
+      } catch (e) {
+        return false;
+      }
+    })();
+
+    const ok = (response.status === 302 && redirectIsSafe)
+      || (response.status >= 200 && response.status < 300 && !loginPage);
+    const is403 = response.status === 403;
+
+    if (!ok) {
+      const rawSnippet = bodyText || '';
+      const scrubbed = redactSecrets(rawSnippet);
+      bodySnippet = scrubbed.substring(0, 200);
+    }
+
+    const classifier = ok ? 'SUCCESS' : 'FAILURE';
+    logVerbose(
+      `[${attemptLabel}] ${classifier} status=${response.status} loginPage=${loginPage}`,
+      `location=${respHeaders.location || 'none'} contentType=${respHeaders.contentType || 'none'} xRequestId=${respHeaders.xRequestId || 'none'}`
+    );
+    if (!ok && bodySnippet) {
+      logVerbose(`[${attemptLabel}] bodySnippet="${bodySnippet}"`);
+    }
+
+    return { ok, status: response.status, is403, bodySnippet, headers: respHeaders, loginPage };
   }
 
   /**
@@ -462,10 +581,10 @@
       if (res.is403) {
         // 403 could be: CSRF mismatch, session expired, or RBAC
         logError(`403 Forbidden for "${queueName}" - diagnostics:`, diagInfo);
-        if (res.bodySnippet.includes('CSRF') || res.bodySnippet.includes('token')) {
+        if (res.loginPage || res.bodySnippet.toLowerCase().includes('login')) {
+          log(`  → Likely session/cookie issue (login page detected)`);
+        } else if (res.bodySnippet.includes('CSRF') || res.bodySnippet.includes('token')) {
           log(`  → Likely CSRF token mismatch/rotation`);
-        } else if (res.bodySnippet.includes('session') || res.bodySnippet.includes('login')) {
-          log(`  → Likely session/cookie issue`);
         } else {
           log(`  → Possibly RBAC/permission issue`);
         }
@@ -474,7 +593,7 @@
       }
     }
 
-    return { ok: res.ok, status: res.status, is403: res.is403, bodySnippet: res.bodySnippet };
+    return { ok: res.ok, status: res.status, is403: res.is403, bodySnippet: res.bodySnippet, loginPage: res.loginPage };
   }
 
   /**
@@ -492,6 +611,8 @@
       success: false,
       errors: [],
       remainingQueues: [],
+      aborted: false,
+      abortReason: '',
       stats: {
         initial403Count: 0,
         retrySuccessCount: 0,
@@ -515,7 +636,14 @@
         log(`Pass ${pass}/${MAX_PASSES}: Fetching fresh page state...`);
         updateStatus(`Pass ${pass}/${MAX_PASSES}: Checking remaining queues...`);
         try {
-          doc = await fetchQueuesPageDocument();
+          const fetchResult = await fetchQueuesPageDocument(`pass-${pass}`);
+          doc = fetchResult.doc;
+          if (fetchResult.loginPage) {
+            results.aborted = true;
+            results.abortReason = 'Session expired / not authorized (login page detected)';
+            logError(results.abortReason);
+            break;
+          }
         } catch (error) {
           logError(`Failed to fetch page state:`, error);
           doc = document;
@@ -530,14 +658,14 @@
       };
 
       results.stats.headerCsrfSource = tokenSource;
-      log(`Pass ${pass} CSRF: headerToken=${headerToken ? 'present' : 'MISSING'}, source=${tokenSource}`);
+      log(`Pass ${pass} CSRF: headerToken=${headerToken ? tokenPrefix(headerToken) : 'MISSING'}, source=${tokenSource}`);
 
       if (!headerToken) {
         log(`  ⚠ No header CSRF token found - running in body-only mode (higher 403 rate expected)`);
       }
 
       // Get queues that still need action (verbose logging on first pass)
-      let actionable = getActionableQueues(doc, actionType, pass === 1);
+      let actionable = getActionableQueues(doc, actionType, pass === 1 && DEBUG_LEVEL >= 2);
 
       if (actionable.length === 0) {
         log(`Pass ${pass}/${MAX_PASSES}: All queues ${doneLabel}!`);
@@ -554,33 +682,64 @@
       let tokenRefreshedThisPass = false;
 
       // Process each actionable queue
+      let last403At = 0;
+
       for (let i = 0; i < actionable.length; i++) {
         const queueInfo = actionable[i];
         const progressMsg = `Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${i + 1}/${actionable.length} (${queueInfo.queueName})`;
         updateStatus(progressMsg);
+
+        if (ENABLE_LIVE_DOM_RECHECK && i > 0 && i % LIVE_DOM_RECHECK_INTERVAL === 0) {
+          const liveActionable = getActionableQueues(document, actionType, false);
+          const liveKeys = new Set(liveActionable.map(q => q.actionPathKey));
+          if (!liveKeys.has(queueInfo.actionPathKey)) {
+            logVerbose(`Skipping ${queueInfo.queueName} (already in desired state per live DOM)`);
+            continue;
+          }
+        }
+
+        const since403 = Date.now() - last403At;
+        if (last403At > 0 && since403 < RECENT_403_WINDOW_MS) {
+          await sleepJitter(RECENT_403_EXTRA_DELAY_MIN_MS, RECENT_403_EXTRA_DELAY_MAX_MS);
+        }
 
         try {
           const result = await submitQueueAction(queueInfo, csrfContext);
 
           if (result.ok) {
             results.totalProcessed++;
-            log(`✓ ${actionType} ${queueInfo.queueName}`);
+            logVerbose(`✓ ${actionType} ${queueInfo.queueName}`);
           } else if (result.is403) {
             results.stats.initial403Count++;
+            last403At = Date.now();
+
+            if (result.loginPage) {
+              results.aborted = true;
+              results.abortReason = 'Session expired / not authorized (login page detected on POST)';
+              logError(results.abortReason);
+              break;
+            }
 
             // On first 403 of this pass, refresh tokens and retry this one queue
             if (!tokenRefreshedThisPass) {
               log(`First 403 this pass - refreshing tokens and retrying "${queueInfo.queueName}"...`);
 
               try {
-                const freshDoc = await fetchQueuesPageDocument();
+                const fetchResult = await fetchQueuesPageDocument('token-refresh');
+                const freshDoc = fetchResult.doc;
+                if (fetchResult.loginPage) {
+                  results.aborted = true;
+                  results.abortReason = 'Session expired / not authorized (login page detected on refresh)';
+                  logError(results.abortReason);
+                  break;
+                }
                 const { token: freshHeaderToken, source: freshSource } = getHeaderCsrfToken(freshDoc);
                 csrfContext.headerToken = freshHeaderToken;
                 csrfContext.tokenSource = freshSource;
                 results.stats.tokenRefreshCount++;
                 results.stats.headerCsrfSource = freshSource;
 
-                log(`Token refresh: headerToken=${freshHeaderToken ? 'present' : 'MISSING'}, source=${freshSource}`);
+                log(`Token refresh: headerToken=${freshHeaderToken ? tokenPrefix(freshHeaderToken) : 'MISSING'}, source=${freshSource}`);
 
                 // Update this queue's form token from fresh page
                 const freshMap = buildQueueTokenMap(freshDoc, actionType);
@@ -604,7 +763,12 @@
                 if (retryResult.ok) {
                   results.totalProcessed++;
                   results.stats.retrySuccessCount++;
-                  log(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
+                  logVerbose(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
+                } else if (retryResult.is403 && retryResult.loginPage) {
+                  results.aborted = true;
+                  results.abortReason = 'Session expired / not authorized (login page detected after retry)';
+                  logError(results.abortReason);
+                  break;
                 } else {
                   // Still failed after refresh - likely RBAC, not CSRF
                   results.errors.push({
@@ -653,6 +817,10 @@
         }
       }
 
+      if (results.aborted) {
+        break;
+      }
+
       // If not the last pass, wait with jitter for server state to settle
       if (pass < MAX_PASSES) {
         log(`Waiting for server state to settle...`);
@@ -664,7 +832,8 @@
     if (!results.success) {
       log(`Checking final state after ${MAX_PASSES} passes...`);
       try {
-        const finalDoc = await fetchQueuesPageDocument();
+        const fetchResult = await fetchQueuesPageDocument('final-check');
+        const finalDoc = fetchResult.doc;
         const remaining = getActionableQueues(finalDoc, actionType);
         results.remainingQueues = remaining.map(q => q.queueName);
 
@@ -717,6 +886,12 @@
       return;
     }
 
+    if (bulkActionInProgress) {
+      statusElement.textContent = 'Already running...';
+      statusElement.className = 'sqks-status';
+      return;
+    }
+
     // Confirmation dialog
     const confirmMessage = actionType === 'pause'
       ? `Pause ${initialActionable.length} queue(s)? This will stop queue processing until unpaused.`
@@ -732,6 +907,7 @@
     buttons.forEach(btn => btn.disabled = true);
     statusElement.textContent = `${actionLabel}ing...`;
     statusElement.className = 'sqks-status sqks-status-progress';
+    bulkActionInProgress = true;
 
     try {
       const results = await convergeQueues(
@@ -741,7 +917,10 @@
 
       // Build result message
       let resultMessage;
-      if (results.success) {
+      if (results.aborted) {
+        resultMessage = results.abortReason || 'Session expired / not authorized';
+        statusElement.className = 'sqks-status sqks-status-error';
+      } else if (results.success) {
         resultMessage = `Done: All queues ${doneLabel}`;
         if (results.passesUsed > 1) {
           resultMessage += ` (${results.passesUsed} passes)`;
@@ -772,6 +951,7 @@
       statusElement.className = 'sqks-status sqks-status-error';
     } finally {
       buttons.forEach(btn => btn.disabled = false);
+      bulkActionInProgress = false;
     }
   }
 

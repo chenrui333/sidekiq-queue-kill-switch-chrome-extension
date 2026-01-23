@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.8] - 2025-01-24
+
+### Added
+- DEBUG_LEVEL logging controls (0 quiet, 1 summary/errors, 2 verbose per-queue)
+- POST/GET diagnostics: CSRF token prefixes, request/response metadata, success classifier
+- Session invalidation hard-stop when login page detected on GET or POST
+
+### Changed
+- Success classification now treats 302 with safe same-origin redirect as success and avoids login-page 200s
+- Normalized actionPathKey to prevent refresh map mismatches
+- Added 403-aware pacing backoff and optional live DOM recheck to reduce redundant POSTs
+
+### Fixed
+- Refresh + retry now rehydrates tokens atomically from a single page fetch with consistent keying
 
 ## [1.0.7] - 2025-01-23
 
