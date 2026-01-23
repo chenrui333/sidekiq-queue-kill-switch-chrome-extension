@@ -366,8 +366,31 @@
     if (!currentRun) return;
     currentRun.endedAt = new Date().toISOString();
     currentRun.results = results || null;
+    currentRun.harTrace = collectHarLikeTrace();
     downloadRunLog(currentRun);
     currentRun = null;
+  }
+
+  function collectHarLikeTrace() {
+    if (!performance || typeof performance.getEntriesByType !== 'function') {
+      return [];
+    }
+    try {
+      const entries = performance.getEntriesByType('resource') || [];
+      return entries
+        .filter(entry => entry.name && entry.name.includes('/sidekiq/queues/'))
+        .map(entry => ({
+          name: entry.name,
+          initiatorType: entry.initiatorType,
+          startTime: entry.startTime,
+          duration: entry.duration,
+          transferSize: entry.transferSize,
+          encodedBodySize: entry.encodedBodySize,
+          decodedBodySize: entry.decodedBodySize,
+        }));
+    } catch (e) {
+      return [];
+    }
   }
 
   function downloadRunLog(run) {
@@ -866,7 +889,7 @@
    * Submit an action for a single queue
    * Returns { ok, status, is403, bodySnippet } - caller handles refresh logic
    */
-  async function submitQueueAction(queueInfo, csrfContext) {
+  async function submitQueueAction(queueInfo, csrfContext, actionTypeOverride) {
     const { queueName, action, formToken, submitName, submitValue } = queueInfo;
     const url = new URL(action, window.location.origin);
 
@@ -875,19 +898,20 @@
       throw new Error('SAFETY: Refusing to submit delete action');
     }
 
-    const useNativeForm = NATIVE_FORM_ACTIONS.includes(queueInfo.actionType);
+    const effectiveActionType = actionTypeOverride || queueInfo.actionType;
+    const useNativeForm = NATIVE_FORM_ACTIONS.includes(effectiveActionType);
     let res;
 
     if (useNativeForm) {
-      const nativeRes = await submitViaNativeForm(queueInfo, queueInfo.actionType);
+      const nativeRes = await submitViaNativeForm(queueInfo, effectiveActionType);
       logVerbose(
-        `[native] ${queueInfo.actionType} ${queueName} mode=${nativeRes.mode} reason=${nativeRes.reason} hasQueuesTable=${nativeRes.hasQueuesTable}`
+        `[native] ${effectiveActionType} ${queueName} mode=${nativeRes.mode} reason=${nativeRes.reason} hasQueuesTable=${nativeRes.hasQueuesTable}`
       );
       if (currentRun) {
         currentRun.submissions.push({
           ts: new Date().toISOString(),
           queueName,
-          actionType: queueInfo.actionType,
+          actionType: effectiveActionType,
           actionPath: url.pathname,
           requestMode: 'native',
           request: {
@@ -912,6 +936,8 @@
       if (nativeRes.ok) {
         return { ok: true, status: 200, is403: false, bodySnippet: '', loginPage: false, diagKind: 'NONE', hasQueuesTable: nativeRes.hasQueuesTable };
       }
+    } else if (!effectiveActionType) {
+      logVerbose(`[native] skip ${queueName} missing actionType`);
     }
 
     const requestMode = csrfContext.headerToken ? 'xhr' : 'form';
@@ -1112,7 +1138,7 @@
         }
 
         try {
-          const result = await submitQueueAction(queueInfo, csrfContext);
+          const result = await submitQueueAction(queueInfo, csrfContext, actionType);
 
           if (result.ok) {
             results.totalProcessed++;
@@ -1164,7 +1190,7 @@
                 if (fresh) {
                   queueInfo.formToken = fresh.formToken;
                 }
-                const retryResult = await submitQueueAction(queueInfo, csrfContext);
+                const retryResult = await submitQueueAction(queueInfo, csrfContext, actionType);
                 if (retryResult.ok) {
                   results.totalProcessed++;
                   results.stats.retrySuccessCount++;
