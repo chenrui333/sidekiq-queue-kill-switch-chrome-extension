@@ -98,11 +98,22 @@
   }
 
   /**
-   * Get the authenticity token from a form element
+   * Get the authenticity token from a form element (hidden input)
    */
   function getAuthenticityToken(form) {
     const tokenInput = form.querySelector('input[name="authenticity_token"]');
     return tokenInput ? tokenInput.value : null;
+  }
+
+  /**
+   * Get the CSRF token from the page's meta tag
+   * Rails uses this for X-CSRF-Token header validation
+   * @param {Document} doc - Document to search (live DOM or parsed)
+   * @returns {string|null} Meta CSRF token or null if not found
+   */
+  function getMetaCsrfToken(doc) {
+    const meta = doc.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute('content') : null;
   }
 
   /**
@@ -178,8 +189,8 @@
 
   /**
    * Get actionable queue forms from a document (live DOM or fetched)
-   * Returns array of { queueName, form, action, token, submitName, submitValue }
-   * for queues that still need the specified action
+   * Returns array of queue info objects for queues that still need the specified action
+   * Each object includes both formToken (for body) and headerToken (for X-CSRF-Token header)
    */
   function getActionableQueues(doc, actionType, verbose = false) {
     const table = doc.querySelector('table.queues');
@@ -190,6 +201,12 @@
 
     const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
     const actionable = [];
+
+    // Get meta CSRF token once for the document (used for X-CSRF-Token header)
+    const metaCsrfToken = getMetaCsrfToken(doc);
+    if (verbose) {
+      log(`Meta CSRF token found: ${!!metaCsrfToken}`);
+    }
 
     // Counters for observability
     let formsWithDelete = 0;
@@ -213,8 +230,8 @@
         continue;
       }
 
-      const token = getAuthenticityToken(form);
-      if (!token) {
+      const formToken = getAuthenticityToken(form);
+      if (!formToken) {
         logError(`No authenticity token for queue: ${queueName}`);
         formsNoToken++;
         continue;
@@ -245,7 +262,9 @@
       actionable.push({
         queueName,
         action,
-        token,
+        actionPathKey: action, // Used to re-find form after page refetch
+        formToken,             // For POST body authenticity_token param
+        headerToken: metaCsrfToken || formToken, // For X-CSRF-Token header (prefer meta)
         submitName,
         submitValue: submitValue || submitName, // Fallback to name if value missing
       });
@@ -263,40 +282,33 @@
 
   /**
    * Build headers that mimic a real browser form submission for Rails CSRF
-   * @param {string} token - The CSRF authenticity token
+   * @param {string} headerToken - The CSRF token for X-CSRF-Token header (prefer meta tag token)
    * @returns {Object} Headers object for fetch
    */
-  function buildRailsHeaders(token) {
+  function buildRailsHeaders(headerToken) {
     return {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'X-CSRF-Token': token,
+      'X-CSRF-Token': headerToken,
       'X-Requested-With': 'XMLHttpRequest',
     };
   }
 
   /**
-   * Submit an action for a single queue
+   * Perform a single POST request for a queue action
+   * @returns {Object} { ok, status, statusText, bodySnippet, headers }
    */
-  async function submitQueueAction(queueInfo) {
-    const { queueName, action, token, submitName, submitValue } = queueInfo;
-    const url = new URL(action, window.location.origin);
-
-    // SAFETY: Final guard against delete
-    if (submitName.toLowerCase() === 'delete') {
-      throw new Error('SAFETY: Refusing to submit delete action');
-    }
-
-    // Build POST body exactly as browser would for form submission
+  async function doQueuePost(url, formToken, headerToken, submitName, submitValue, attemptLabel) {
+    // Build POST body with form token (as browser would send)
     const body = new URLSearchParams();
-    body.append('authenticity_token', token);
+    body.append('authenticity_token', formToken);
     body.append(submitName, submitValue);
 
-    log(`POST ${url.pathname} → ${submitName}=${submitValue} (queue: ${queueName})`);
+    log(`[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue}`);
 
     const response = await fetch(url.toString(), {
       method: 'POST',
-      headers: buildRailsHeaders(token),
+      headers: buildRailsHeaders(headerToken), // Use meta/header token for X-CSRF-Token
       body: body.toString(),
       credentials: 'include',
       redirect: 'follow',
@@ -304,23 +316,96 @@
       referrerPolicy: 'strict-origin-when-cross-origin',
     });
 
-    // Rails typically returns 302 redirect on success
-    // fetch with redirect: 'follow' will follow it and return 200
-    if (!response.ok && response.status !== 302) {
-      // On error, try to extract response body for debugging
-      let errorDetail = '';
+    // Extract debug info
+    let bodySnippet = '';
+    const headers = {
+      contentType: response.headers.get('content-type'),
+      location: response.headers.get('location'),
+      xRequestId: response.headers.get('x-request-id'),
+    };
+
+    // Rails typically returns 302 redirect on success; fetch follows it to 200
+    const ok = response.ok || response.status === 302;
+
+    if (!ok) {
       try {
         const text = await response.text();
-        errorDetail = text.substring(0, 200);
-        logError(`Response body (first 200 chars):`, errorDetail);
-        logError(`Response headers:`, {
-          contentType: response.headers.get('content-type'),
-          location: response.headers.get('location'),
-        });
+        bodySnippet = text.substring(0, 200);
       } catch (e) {
         // Ignore read errors
       }
-      throw new Error(`HTTP ${response.status}: ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
+    }
+
+    return { ok, status: response.status, statusText: response.statusText, bodySnippet, headers };
+  }
+
+  /**
+   * Submit an action for a single queue with 403 retry logic
+   * On 403, refreshes CSRF tokens from fresh page fetch and retries once
+   */
+  async function submitQueueAction(queueInfo) {
+    const { queueName, action, actionPathKey, formToken, headerToken, submitName, submitValue } = queueInfo;
+    const url = new URL(action, window.location.origin);
+
+    // SAFETY: Final guard against delete
+    if (submitName.toLowerCase() === 'delete') {
+      throw new Error('SAFETY: Refusing to submit delete action');
+    }
+
+    log(`Queue "${queueName}": formToken=${formToken?.substring(0, 8)}..., headerToken=${headerToken?.substring(0, 8)}...`);
+
+    // Initial attempt
+    let res = await doQueuePost(url, formToken, headerToken, submitName, submitValue, 'initial');
+
+    // Handle 403 with CSRF token refresh retry
+    if (res.status === 403) {
+      logError(`403 Forbidden for "${queueName}" on initial attempt`);
+      logError(`  Response: ${res.bodySnippet || 'Forbidden'}`);
+      logError(`  Headers:`, res.headers);
+      log(`Refreshing CSRF tokens and retrying once...`);
+
+      try {
+        const freshDoc = await fetchQueuesPageDocument();
+        const freshHeaderToken = getMetaCsrfToken(freshDoc);
+
+        // Re-locate the form by action path
+        let form = freshDoc.querySelector(`form[action="${actionPathKey}"]`);
+        if (!form) {
+          // Try partial match if exact fails
+          form = freshDoc.querySelector(`form[action*="${actionPathKey}"]`);
+        }
+
+        const freshFormToken = form ? getAuthenticityToken(form) : null;
+
+        log(`Token refresh: freshMeta=${!!freshHeaderToken}, freshForm=${!!freshFormToken}`);
+
+        if (!freshFormToken) {
+          logError(`Could not refresh form token for "${queueName}"; using original + fresh meta`);
+        }
+
+        const retryFormToken = freshFormToken || formToken;
+        const retryHeaderToken = freshHeaderToken || retryFormToken;
+
+        res = await doQueuePost(url, retryFormToken, retryHeaderToken, submitName, submitValue, 'retry');
+
+        if (res.status === 403) {
+          logError(`403 persists after CSRF refresh for "${queueName}" - likely permission/RBAC issue`);
+          logError(`  Response: ${res.bodySnippet || 'Forbidden'}`);
+          throw new Error(`HTTP 403 after CSRF refresh (likely permission/RBAC). Body: ${res.bodySnippet || 'Forbidden'}`);
+        }
+      } catch (refreshError) {
+        if (refreshError.message.includes('HTTP 403 after CSRF refresh')) {
+          throw refreshError;
+        }
+        logError(`Failed to refresh tokens for "${queueName}":`, refreshError);
+        throw new Error(`HTTP 403 and token refresh failed: ${refreshError.message}`);
+      }
+    }
+
+    if (!res.ok) {
+      logError(`Response body (first 200 chars):`, res.bodySnippet);
+      logError(`Response headers:`, res.headers);
+      throw new Error(`HTTP ${res.status}: ${res.statusText}${res.bodySnippet ? ` - ${res.bodySnippet}` : ''}`);
     }
 
     return true;

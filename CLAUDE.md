@@ -41,12 +41,22 @@ The extension handles this with a verification + retry loop:
 - Jittered delay between individual requests (250-900ms)
 - Error backoff with jitter (2000-4000ms) after failed requests
 
+### CSRF Token Handling
+Rails CSRF protection requires two tokens:
+- **Body param**: `authenticity_token` from form's hidden input (per-form)
+- **Header**: `X-CSRF-Token` from page's `meta[name="csrf-token"]` (page-wide)
+
+The extension uses the meta token for headers (Rails validates against this) and form token for body.
+On 403 Forbidden, it refreshes tokens by re-fetching the page and retries once - if still 403,
+it's likely a permission/RBAC issue rather than CSRF.
+
 ### Safety Rules
 1. **Never send delete parameter** - Multiple guards at every level
 2. **ALLOWED_ACTIONS allowlist** - Only 'pause' and 'unpause' permitted
 3. **Read button state from DOM** - Don't hardcode pause/unpause values
-4. **Use page's CSRF token** - Read from each form's hidden input + X-CSRF-Token header
+4. **Use page's CSRF tokens** - Meta token for header, form token for body
 5. **Rate limit requests** - Jittered delays (250-900ms) between POSTs
+6. **Single retry on 403** - Refresh tokens once, then treat as permission error
 
 ### Console Logging
 All logs prefixed with `[SQKS]` for easy filtering in DevTools.

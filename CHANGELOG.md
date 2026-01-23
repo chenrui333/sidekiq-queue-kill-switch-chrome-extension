@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2025-01-23
+
+### Fixed
+- HTTP 403 Forbidden on bulk pause/unpause when CSRF tokens rotate after first request
+- Now uses meta tag CSRF token (`meta[name="csrf-token"]`) for `X-CSRF-Token` header (Rails standard)
+- Form hidden input token used for POST body `authenticity_token` param
+
+### Added
+- `getMetaCsrfToken(doc)` helper to read Rails meta CSRF token
+- Automatic 403 retry with fresh token refresh (at most one retry per queue)
+- Enhanced logging distinguishing CSRF vs permission/RBAC rejections
+- Token diagnostics: logs whether meta token was found and token prefixes
+
+### Changed
+- `getActionableQueues()` now returns `formToken` + `headerToken` separately
+- `submitQueueAction()` refactored with `doQueuePost()` helper for cleaner retry logic
+- On 403 retry, re-fetches page and re-locates form to get fresh tokens
+
 ## [1.0.4] - 2025-01-23
 
 ### Fixed
