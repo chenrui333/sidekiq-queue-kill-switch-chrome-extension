@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2025-01-23
+
+### Changed
+- **REVERTS v1.0.6**: Restores v1.0.5 CSRF model as foundation with additional hardening
+- Header CSRF token now ONLY comes from page-global sources (meta tag or script-embedded)
+- Hidden form inputs are NEVER used for header token (they are per-form masked tokens)
+- Re-enabled `X-Requested-With: XMLHttpRequest` header (Rails expects this for AJAX)
+- Uses `redirect: 'manual'` to properly detect 302 redirects as success
+
+### Added
+- `getHeaderCsrfToken(doc)` with conservative script-embedded token discovery patterns
+- Explicit "body-only mode" warning when no header CSRF token found
+- Enhanced 403 diagnostics: distinguishes CSRF mismatch vs session issue vs RBAC
+- Summary line in logs: `passes=?, ok=?, initial403=?, retriedOk=?, refreshes=?, headerCsrfSource=?`
+- `Origin` header (best-effort) to reduce CSRF false negatives
+- `setCookie` presence in response headers for diagnostics
+
+### Fixed
+- Separation of concerns: body token (form hidden input) vs header token (meta/script)
+- Per-pass token refresh: first 403 triggers refresh+retry, subsequent 403s deferred to next pass
+
+### Removed
+- `hidden_input` fallback for header CSRF token (caused mismatches)
+- `CSRF_REQUEST_MODE` constant (always use XHR mode now)
+
 ## [1.0.6] - 2025-01-23
 
 ### Changed
