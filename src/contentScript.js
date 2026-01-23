@@ -106,10 +106,11 @@
   }
 
   /**
-   * Find a submit button by action type (pause/unpause) in a form element
-   * Detects from DOM - does not hardcode values
+   * Find a submit control by action type (pause/unpause) in a form element
+   * PRIMARY: Selects by name attribute (most reliable for Rails forms)
+   * FALLBACK: Selects by value or text content
    * Supports both <input type="submit"> and <button> elements
-   * Returns null if no matching button found
+   * Returns null if no matching control found
    */
   function findSubmitButton(form, actionType) {
     // SAFETY: Only allow known action types
@@ -118,8 +119,20 @@
       return null;
     }
 
-    // Search both input[type="submit"] and button elements
-    // HTML default button type is "submit" inside a form
+    // PRIMARY: Direct name-based selection (most reliable for Rails)
+    // This is how browsers identify which submit button was clicked
+    const byName = form.querySelector(
+      `input[type="submit"][name="${actionType}"], button[name="${actionType}"]`
+    );
+    if (byName) {
+      // SAFETY: Double-check it's not a delete button
+      const name = (byName.getAttribute('name') || '').toLowerCase();
+      if (!name.includes('delete')) {
+        return byName;
+      }
+    }
+
+    // FALLBACK: Search by value or text content for non-standard forms
     const candidates = form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])');
 
     for (const el of candidates) {
@@ -132,8 +145,8 @@
         continue;
       }
 
-      // Match if name, value, or text equals the action type
-      if (name === actionType || value === actionType || text === actionType) {
+      // Match by value or text (fallback only)
+      if (value === actionType || text === actionType) {
         return el;
       }
     }
@@ -207,9 +220,16 @@
         continue;
       }
 
-      // Get submitName and submitValue, with fallback to actionType for buttons
-      const submitName = submitButton.getAttribute('name') || actionType;
-      const submitValue = submitButton.getAttribute('value') || actionType;
+      // Get exact submitName and submitValue from DOM attributes
+      // Rails forms require the exact name=value pair the browser would send
+      const submitName = submitButton.getAttribute('name');
+      const submitValue = submitButton.getAttribute('value');
+
+      // SAFETY: Require name attribute (essential for Rails form submission)
+      if (!submitName) {
+        logError(`Submit button has no name attribute for queue: ${queueName}`);
+        continue;
+      }
 
       // SAFETY: Final check - reject delete
       if (submitName.toLowerCase() === 'delete') {
@@ -217,12 +237,17 @@
         continue;
       }
 
+      // Log the exact name=value pair we'll submit (helps debugging)
+      if (verbose) {
+        log(`  Queue "${queueName}": will submit ${submitName}=${submitValue}`);
+      }
+
       actionable.push({
         queueName,
         action,
         token,
         submitName,
-        submitValue,
+        submitValue: submitValue || submitName, // Fallback to name if value missing
       });
     }
 
@@ -262,11 +287,12 @@
       throw new Error('SAFETY: Refusing to submit delete action');
     }
 
+    // Build POST body exactly as browser would for form submission
     const body = new URLSearchParams();
     body.append('authenticity_token', token);
     body.append(submitName, submitValue);
 
-    log(`Submitting ${submitName}=${submitValue} to ${url.pathname} (${queueName})`);
+    log(`POST ${url.pathname} → ${submitName}=${submitValue} (queue: ${queueName})`);
 
     const response = await fetch(url.toString(), {
       method: 'POST',

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2025-01-23
+
+### Fixed
+- Pause/Unpause All now reliably works with Sidekiq Enterprise 2.5.3
+- Submit control selection now uses `name` attribute as primary selector (matches Rails form behavior)
+- POST body now sends exact `name=value` pair from DOM attributes (e.g., `pause=Pause`)
+
+### Improved
+- Added observability logging: shows exact `name=value` pair being submitted for each queue
+- Better error handling when submit buttons lack required `name` attribute
+
+### Security
+- Added validation that submit control has `name` attribute before processing
+
 ## [1.0.3] - 2025-01-23
 
 ### Fixed
