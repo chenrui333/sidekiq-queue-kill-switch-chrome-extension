@@ -1,0 +1,70 @@
+/**
+ * Sidekiq Queue Kill Switch - Styles
+ *
+ * Minimal styling that complements Sidekiq's Bootstrap-based UI.
+ */
+
+.sqks-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 15px 0;
+  padding: 10px 15px;
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+}
+
+.sqks-btn {
+  padding: 6px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 4px;
+  border: none;
+  transition: opacity 0.2s ease;
+}
+
+.sqks-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sqks-btn.btn-danger {
+  background-color: #dc3545;
+  color: white;
+}
+
+.sqks-btn.btn-danger:hover:not(:disabled) {
+  background-color: #c82333;
+}
+
+.sqks-btn.btn-primary {
+  background-color: #007bff;
+  color: white;
+}
+
+.sqks-btn.btn-primary:hover:not(:disabled) {
+  background-color: #0069d9;
+}
+
+.sqks-status {
+  margin-left: 10px;
+  font-size: 13px;
+  color: #6c757d;
+}
+
+.sqks-status-progress {
+  color: #007bff;
+  font-weight: 500;
+}
+
+.sqks-status-success {
+  color: #28a745;
+  font-weight: 500;
+}
+
+.sqks-status-error {
+  color: #dc3545;
+  font-weight: 500;
+}
