@@ -1365,10 +1365,12 @@
       statusElement.textContent = resultMessage;
       log(`Final results:`, results);
 
-      // Refresh page after a brief delay to show the status
-      setTimeout(() => {
-        window.location.reload();
-      }, 1500);
+      if (results.success) {
+        // Refresh page after a brief delay to show the status
+        setTimeout(() => {
+          window.location.reload();
+        }, 1500);
+      }
 
     } catch (error) {
       logError('Bulk action failed:', error);
@@ -1388,6 +1390,11 @@
   function injectControls() {
     if (!isQueuesPage()) {
       log('Not on Sidekiq Queues page, skipping injection');
+      return;
+    }
+
+    if (document.querySelector('.sqks-controls')) {
+      log('Controls already injected, skipping');
       return;
     }
 

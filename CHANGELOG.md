@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.3.3] - 2025-01-24
+
+### Fixed
+- Add idempotent guard to prevent duplicate control injection on page navigation
+- Only auto-reload page on successful completion (errors now stay visible for debugging)
+
 ## [1.3.2] - 2025-01-24
 
 ### Removed
