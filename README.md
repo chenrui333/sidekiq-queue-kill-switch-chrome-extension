@@ -41,22 +41,9 @@ A Chrome extension (Manifest V3) that adds **Pause All** and **Unpause All** con
 5. Watch the status indicator as queues are processed
 6. The page automatically refreshes when complete
 
-## Screenshots
+## Demo
 
-The extension adds controls that look like this:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ [Pause All Queues] [Unpause All Queues]  Status: Ready      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-During operation:
-```
-┌─────────────────────────────────────────────────────────────┐
-│ [Pause All Queues] [Unpause All Queues]  Pausing 5/12...    │
-└─────────────────────────────────────────────────────────────┘
-```
+https://github.com/user-attachments/assets/8e575ed7-87d0-4c65-bb93-c83cb1d7c991
 
 ## How It Works
 
