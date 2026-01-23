@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2025-01-23
+
+### Fixed
+- Button detection now finds action controls rendered as `<button>` elements, not just `<input type="submit">` (root cause of "only 5 queues paused" issue)
+- Match buttons by `name`, `value`, or `textContent` for broader compatibility with different Sidekiq UI versions
+
+### Improved
+- Human-like jittered delays between actions (250-900ms) and between passes (1.5-3.5s) for more natural request patterns
+- Error backoff: waits 2-4s after failed requests before continuing
+- Enhanced logging shows enumeration breakdown (total forms, actionable, already in state, delete-only, missing token)
+- Fallback values for `submitName`/`submitValue` when buttons lack explicit attributes
+
+### Security
+- Extended delete guards to check button `textContent` in addition to `name` and `value` attributes
+- Uses `includes('delete')` check for broader protection against delete-like controls
+
 ## [1.0.1] - 2025-01-23
 
 ### Fixed

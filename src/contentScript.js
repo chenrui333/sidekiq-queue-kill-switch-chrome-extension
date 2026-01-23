@@ -13,9 +13,15 @@
   'use strict';
 
   const LOG_PREFIX = '[SQKS]';
-  const POST_DELAY_MS = 150;      // Delay between individual POST requests
-  const PASS_DELAY_MS = 750;      // Delay between passes to let server state settle
   const MAX_PASSES = 5;           // Maximum convergence attempts
+
+  // Jittered delays for human-like behavior
+  const POST_DELAY_MIN_MS = 250;      // Min delay between individual POST requests
+  const POST_DELAY_MAX_MS = 900;      // Max delay between individual POST requests
+  const PASS_DELAY_MIN_MS = 1500;     // Min delay between passes
+  const PASS_DELAY_MAX_MS = 3500;     // Max delay between passes
+  const ERROR_BACKOFF_MIN_MS = 2000;  // Min backoff after errors
+  const ERROR_BACKOFF_MAX_MS = 4000;  // Max backoff after errors
 
   // Allowed action types - explicit allowlist for safety
   const ALLOWED_ACTIONS = ['pause', 'unpause'];
@@ -25,6 +31,21 @@
    */
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Random integer in range [min, max] inclusive
+   */
+  function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  /**
+   * Sleep with jitter - random duration between minMs and maxMs
+   */
+  function sleepJitter(minMs, maxMs) {
+    const duration = randomInt(minMs, maxMs);
+    return sleep(duration);
   }
 
   /**
@@ -87,6 +108,7 @@
   /**
    * Find a submit button by action type (pause/unpause) in a form element
    * Detects from DOM - does not hardcode values
+   * Supports both <input type="submit"> and <button> elements
    * Returns null if no matching button found
    */
   function findSubmitButton(form, actionType) {
@@ -96,20 +118,23 @@
       return null;
     }
 
-    const submits = form.querySelectorAll('input[type="submit"]');
+    // Search both input[type="submit"] and button elements
+    // HTML default button type is "submit" inside a form
+    const candidates = form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])');
 
-    for (const submit of submits) {
-      const name = (submit.getAttribute('name') || '').toLowerCase();
-      const value = (submit.getAttribute('value') || '').toLowerCase();
+    for (const el of candidates) {
+      const name = (el.getAttribute('name') || '').trim().toLowerCase();
+      const value = (el.getAttribute('value') || '').trim().toLowerCase();
+      const text = (el.textContent || '').trim().toLowerCase();
 
-      // SAFETY: Explicitly reject delete buttons
-      if (name === 'delete' || value === 'delete') {
+      // SAFETY: Explicitly reject delete buttons by name, value, or text
+      if (name.includes('delete') || value.includes('delete') || text.includes('delete')) {
         continue;
       }
 
-      // SAFETY: Only match if name or value exactly equals the action type
-      if (name === actionType || value === actionType) {
-        return submit;
+      // Match if name, value, or text equals the action type
+      if (name === actionType || value === actionType || text === actionType) {
+        return el;
       }
     }
 
@@ -143,14 +168,20 @@
    * Returns array of { queueName, form, action, token, submitName, submitValue }
    * for queues that still need the specified action
    */
-  function getActionableQueues(doc, actionType) {
+  function getActionableQueues(doc, actionType, verbose = false) {
     const table = doc.querySelector('table.queues');
     if (!table) {
+      if (verbose) log('No table.queues found in document');
       return [];
     }
 
     const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
     const actionable = [];
+
+    // Counters for observability
+    let formsWithDelete = 0;
+    let formsNoMatchingAction = 0;
+    let formsNoToken = 0;
 
     for (const form of forms) {
       const action = form.getAttribute('action');
@@ -159,17 +190,26 @@
 
       // If no submit button for this action, queue is already in desired state
       if (!submitButton) {
+        // Check if form has delete but no pause/unpause (for debugging)
+        const hasDelete = form.querySelector('input[name="delete"], button[name="delete"]');
+        if (hasDelete) {
+          formsWithDelete++;
+        } else {
+          formsNoMatchingAction++;
+        }
         continue;
       }
 
       const token = getAuthenticityToken(form);
       if (!token) {
         logError(`No authenticity token for queue: ${queueName}`);
+        formsNoToken++;
         continue;
       }
 
-      const submitName = submitButton.getAttribute('name');
-      const submitValue = submitButton.getAttribute('value');
+      // Get submitName and submitValue, with fallback to actionType for buttons
+      const submitName = submitButton.getAttribute('name') || actionType;
+      const submitValue = submitButton.getAttribute('value') || actionType;
 
       // SAFETY: Final check - reject delete
       if (submitName.toLowerCase() === 'delete') {
@@ -184,6 +224,13 @@
         submitName,
         submitValue,
       });
+    }
+
+    if (verbose) {
+      log(`Enumeration: ${forms.length} total forms, ${actionable.length} actionable for "${actionType}"`);
+      log(`  - Already in desired state: ${formsNoMatchingAction}`);
+      log(`  - Delete-only forms: ${formsWithDelete}`);
+      log(`  - Missing token: ${formsNoToken}`);
     }
 
     return actionable;
@@ -262,8 +309,8 @@
         }
       }
 
-      // Get queues that still need action
-      const actionable = getActionableQueues(doc, actionType);
+      // Get queues that still need action (verbose logging on first pass)
+      const actionable = getActionableQueues(doc, actionType, pass === 1);
 
       if (actionable.length === 0) {
         log(`Pass ${pass}/${MAX_PASSES}: All queues ${doneLabel}!`);
@@ -287,20 +334,22 @@
           results.totalProcessed++;
           log(`Success: ${actionType} ${queueInfo.queueName}`);
         } catch (error) {
-          results.errors.push({ queue: queueInfo.queueName, error: error.message, pass });
+          results.errors.push({ queue: queueInfo.queueName, error: String(error.message || error), pass });
           logError(`Failed to ${actionType} ${queueInfo.queueName}:`, error);
+          // Backoff after errors
+          await sleepJitter(ERROR_BACKOFF_MIN_MS, ERROR_BACKOFF_MAX_MS);
         }
 
-        // Delay between requests (except after last one)
+        // Jittered delay between requests (except after last one)
         if (i < actionable.length - 1) {
-          await sleep(POST_DELAY_MS);
+          await sleepJitter(POST_DELAY_MIN_MS, POST_DELAY_MAX_MS);
         }
       }
 
-      // If not the last pass, wait for server state to settle before re-checking
+      // If not the last pass, wait with jitter for server state to settle before re-checking
       if (pass < MAX_PASSES) {
-        log(`Waiting ${PASS_DELAY_MS}ms for server state to settle...`);
-        await sleep(PASS_DELAY_MS);
+        log(`Waiting for server state to settle...`);
+        await sleepJitter(PASS_DELAY_MIN_MS, PASS_DELAY_MAX_MS);
       }
     }
 
