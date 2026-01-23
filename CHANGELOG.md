@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.9] - 2025-01-24
+
+### Added
+- Extended CSRF header token discovery (meta param, inline script, data-csrf, response header)
+- Form-like POST fallback when header CSRF token is missing
+- Evidence-based 403 classification (LOGIN/CSRF/RBAC/UNKNOWN)
+- Pass 1 preflight refresh when header token is missing
+
+### Changed
+- Refresh strategy now rebuilds actionable queues in the same pass after token refresh
+- POST success classifier recognizes form-like 200 responses with queue table
 ## [1.0.8] - 2025-01-24
 
 ### Added

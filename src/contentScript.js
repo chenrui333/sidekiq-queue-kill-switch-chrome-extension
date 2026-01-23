@@ -36,9 +36,10 @@
   const RECENT_403_EXTRA_DELAY_MAX_MS = 1800;
   const LIVE_DOM_RECHECK_INTERVAL = 4;
   const ENABLE_LIVE_DOM_RECHECK = true;
-  const REQUEST_MODE = 'xhr';
   const REQUEST_CREDENTIALS = 'include';
   const REQUEST_REDIRECT = 'manual';
+  const INLINE_SCRIPT_SCAN_LIMIT = 200000;
+  const TOKEN_PATTERN = /^[A-Za-z0-9+/_=-]{20,200}$/;
 
   // Allowed action types - explicit allowlist for safety
   const ALLOWED_ACTIONS = ['pause', 'unpause'];
@@ -126,6 +127,67 @@
     return false;
   }
 
+  function isTokenLike(value) {
+    if (!value) return false;
+    const trimmed = value.trim();
+    return TOKEN_PATTERN.test(trimmed);
+  }
+
+  function extractTokenFromInlineScripts(doc, paramName) {
+    const scripts = doc.querySelectorAll('script:not([src])');
+    let total = 0;
+
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      if (!text) continue;
+      total += text.length;
+      if (total > INLINE_SCRIPT_SCAN_LIMIT) break;
+
+      if (paramName) {
+        const paramRegex = new RegExp(`${paramName}\\s*[:=]\\s*["']([^"']+)["']`, 'i');
+        const paramMatch = text.match(paramRegex);
+        if (paramMatch && isTokenLike(paramMatch[1])) {
+          return { token: paramMatch[1], source: `script-inline-${paramName}` };
+        }
+      }
+
+      let match = text.match(/csrf.*token\s*[:=]\s*["']([^"']+)["']/i);
+      if (match && isTokenLike(match[1])) {
+        return { token: match[1], source: 'script-inline-csrf' };
+      }
+
+      match = text.match(/(?:window\.)?(?:_token|csrf|csrfToken|_csrf|gon\.csrf|gon\.csrf_token)\s*=\s*["']([^"']+)["']/i);
+      if (match && isTokenLike(match[1])) {
+        return { token: match[1], source: 'script-inline-global' };
+      }
+    }
+
+    return null;
+  }
+
+  function classify403(bodyText, headers) {
+    const lower = (bodyText || '').toLowerCase();
+    const location = (headers.location || '').toLowerCase();
+
+    if (looksLikeLoginPageFromText(bodyText) || location.includes('login') || location.includes('sign_in')) {
+      return 'LOGIN';
+    }
+    if (lower.includes('actioncontroller::invalidauthenticitytoken')
+      || lower.includes('invalid authenticity token')
+      || lower.includes('csrf')) {
+      return 'CSRF';
+    }
+    if (lower.includes('not authorized')
+      || lower.includes('forbidden')
+      || lower.includes('permission')
+      || lower.includes('policy')
+      || lower.includes('pundit')
+      || lower.includes('cancan')) {
+      return 'RBAC';
+    }
+    return 'UNKNOWN';
+  }
+
   function redactSecrets(text) {
     if (!text) return '';
     let redacted = text;
@@ -196,44 +258,49 @@
    * 2. Script-embedded tokens - Some apps embed in inline JS
    *
    * @param {Document} doc - Document to search
-   * @returns {{ token: string|null, source: 'meta'|'script'|'missing' }}
+   * @returns {{ token: string|null, source: string }}
    */
-  function getHeaderCsrfToken(doc) {
+  function getHeaderCsrfTokenExtended(doc, htmlText, responseHeaders) {
     // 1. Standard Rails meta tag (preferred, most reliable)
     const meta = doc.querySelector('meta[name="csrf-token"]');
     if (meta) {
       const content = meta.getAttribute('content');
-      if (content && content.trim()) {
+      if (content && isTokenLike(content)) {
         return { token: content.trim(), source: 'meta' };
       }
     }
 
-    // 2. Look for script-embedded tokens (conservative patterns only)
-    // Some Rails apps store CSRF in a JS variable for AJAX use
-    const scripts = doc.querySelectorAll('script:not([src])');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-
-      // Pattern: window.csrfToken = "..."
-      let match = text.match(/window\.csrfToken\s*=\s*["']([^"']+)["']/);
-      if (match && match[1]) {
-        return { token: match[1], source: 'script' };
-      }
-
-      // Pattern: window._csrf = "..."
-      match = text.match(/window\._csrf\s*=\s*["']([^"']+)["']/);
-      if (match && match[1]) {
-        return { token: match[1], source: 'script' };
-      }
-
-      // Pattern: csrfToken:"..." (common in config objects)
-      match = text.match(/csrfToken\s*:\s*["']([^"']+)["']/);
-      if (match && match[1]) {
-        return { token: match[1], source: 'script' };
+    // 2. meta[name="csrf-param"] + inline scripts
+    const metaParam = doc.querySelector('meta[name="csrf-param"]');
+    const paramName = metaParam ? metaParam.getAttribute('content') : null;
+    if (paramName) {
+      const fromParamScript = extractTokenFromInlineScripts(doc, paramName);
+      if (fromParamScript) {
+        return fromParamScript;
       }
     }
 
-    // 3. No valid header token source found
+    // 3. rails-ujs data attributes
+    const dataEl = doc.querySelector('a[data-method][data-remote][data-csrf], button[data-method][data-remote][data-csrf]');
+    if (dataEl) {
+      const dataToken = dataEl.getAttribute('data-csrf');
+      if (isTokenLike(dataToken)) {
+        return { token: dataToken.trim(), source: 'data-csrf-attr' };
+      }
+    }
+
+    // 4. Inline script assignments (conservative patterns only)
+    const fromScripts = extractTokenFromInlineScripts(doc, null);
+    if (fromScripts) {
+      return fromScripts;
+    }
+
+    // 5. Response header fallback (rare)
+    if (responseHeaders && responseHeaders.xCsrfToken && isTokenLike(responseHeaders.xCsrfToken)) {
+      return { token: responseHeaders.xCsrfToken.trim(), source: 'header-x-csrf-token' };
+    }
+
+    // 6. No valid header token source found
     // IMPORTANT: We do NOT fall back to hidden form inputs - they are for body only
     return { token: null, source: 'missing' };
   }
@@ -305,7 +372,10 @@
     const doc = parser.parseFromString(html, 'text/html');
     const loginPage = looksLikeLoginPageFromDoc(doc) || looksLikeLoginPageFromText(html);
     const hasQueuesTable = !!doc.querySelector('table.queues');
-    const { token: headerToken, source: tokenSource } = getHeaderCsrfToken(doc);
+    const responseHeaders = {
+      xCsrfToken: response.headers.get('x-csrf-token'),
+    };
+    const { token: headerToken, source: tokenSource } = getHeaderCsrfTokenExtended(doc, html, responseHeaders);
 
     log(
       `[${contextLabel}] GET status=${response.status} loginPage=${loginPage} table.queues=${hasQueuesTable}`,
@@ -315,7 +385,7 @@
       logError(`[${contextLabel}] GET non-OK status=${response.status}`);
     }
 
-    return { doc, loginPage, status: response.status, ok: response.ok };
+    return { doc, htmlText: html, loginPage, status: response.status, ok: response.ok, responseHeaders };
   }
 
   /**
@@ -446,6 +516,20 @@
     return headers;
   }
 
+  function buildFormLikeHeaders(headerCsrfToken) {
+    const headers = {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Cache-Control': 'no-cache',
+    };
+
+    if (headerCsrfToken) {
+      headers['X-CSRF-Token'] = headerCsrfToken;
+    }
+
+    return headers;
+  }
+
   /**
    * Perform a single POST request for a queue action
    * Uses redirect: 'manual' to properly detect 302 redirects as success
@@ -458,24 +542,34 @@
    * @param {string} attemptLabel - Label for logging
    * @returns {Object} { ok, status, is403, bodySnippet, headers, loginPage }
    */
-  async function doQueuePost(url, formToken, submitName, submitValue, csrfContext, attemptLabel) {
+  async function doQueuePost(url, formToken, submitName, submitValue, csrfContext, attemptLabel, requestMode) {
     // Build POST body with form token (as browser would send)
     const body = new URLSearchParams();
     body.append('authenticity_token', formToken);
     body.append(submitName, submitValue);
 
-    const headers = buildRailsHeaders(csrfContext.headerToken);
+    const headers = requestMode === 'form'
+      ? buildFormLikeHeaders(csrfContext.headerToken)
+      : buildRailsHeaders(csrfContext.headerToken);
     const headerTokenPrefix = tokenPrefix(csrfContext.headerToken);
     const bodyTokenPrefix = tokenPrefix(formToken);
     const referrer = window.location.href;
+    const redirectMode = requestMode === 'form' ? 'follow' : REQUEST_REDIRECT;
+    const referrerPolicy = requestMode === 'form'
+      ? 'no-referrer-when-downgrade'
+      : 'strict-origin-when-cross-origin';
 
     logVerbose(
       `[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue}`,
       `(bodyToken=${bodyTokenPrefix}, headerToken=${headerTokenPrefix}, headerSource=${csrfContext.tokenSource})`
     );
     logVerbose(
-      `[${attemptLabel}] req mode=${REQUEST_MODE}, credentials=${REQUEST_CREDENTIALS}, referrer=${referrer}, redirect=${REQUEST_REDIRECT}`
+      `[${attemptLabel}] req mode=${requestMode}, credentials=${REQUEST_CREDENTIALS}, referrer=${referrer}, redirect=${redirectMode}`
     );
+
+    if (url.origin !== window.location.origin) {
+      throw new Error('SAFETY: Refusing to POST cross-origin request');
+    }
 
     let response;
     try {
@@ -483,14 +577,15 @@
         method: 'POST',
         headers,
         body: body.toString(),
+        mode: 'same-origin',
         credentials: REQUEST_CREDENTIALS,
-        redirect: REQUEST_REDIRECT, // Important: detect 302 as success signal
+        redirect: redirectMode,
         referrer,
-        referrerPolicy: 'strict-origin-when-cross-origin',
+        referrerPolicy,
       });
     } catch (fetchError) {
       logError(`Fetch error for ${url.pathname}:`, fetchError);
-      return { ok: false, status: 0, is403: false, bodySnippet: fetchError.message, headers: {}, loginPage: false };
+      return { ok: false, status: 0, is403: false, bodySnippet: fetchError.message, headers: {}, loginPage: false, diagKind: 'UNKNOWN', hasQueuesTable: false };
     }
 
     // Extract response metadata for diagnostics
@@ -504,6 +599,7 @@
     let bodySnippet = '';
     let loginPage = false;
     let bodyText = '';
+    let hasQueuesTable = false;
     const isHtml = (respHeaders.contentType || '').includes('text/html');
 
     const shouldReadBody = response.type !== 'opaqueredirect'
@@ -514,6 +610,10 @@
         bodyText = await response.text();
         if (isHtml) {
           loginPage = looksLikeLoginPageFromText(bodyText);
+          if (!loginPage) {
+            const parsed = new DOMParser().parseFromString(bodyText, 'text/html');
+            hasQueuesTable = !!parsed.querySelector('table.queues');
+          }
         }
       } catch (e) {
         // Ignore read errors
@@ -531,8 +631,10 @@
     })();
 
     const ok = (response.status === 302 && redirectIsSafe)
-      || (response.status >= 200 && response.status < 300 && !loginPage);
+      || (response.status >= 200 && response.status < 300 && !loginPage)
+      || (requestMode === 'form' && response.status === 200 && hasQueuesTable);
     const is403 = response.status === 403;
+    const diagKind = is403 ? classify403(bodyText, respHeaders) : 'NONE';
 
     if (!ok) {
       const rawSnippet = bodyText || '';
@@ -542,14 +644,14 @@
 
     const classifier = ok ? 'SUCCESS' : 'FAILURE';
     logVerbose(
-      `[${attemptLabel}] ${classifier} status=${response.status} loginPage=${loginPage}`,
+      `[${attemptLabel}] ${classifier} status=${response.status} loginPage=${loginPage} diag=${diagKind}`,
       `location=${respHeaders.location || 'none'} contentType=${respHeaders.contentType || 'none'} xRequestId=${respHeaders.xRequestId || 'none'}`
     );
     if (!ok && bodySnippet) {
       logVerbose(`[${attemptLabel}] bodySnippet="${bodySnippet}"`);
     }
 
-    return { ok, status: response.status, is403, bodySnippet, headers: respHeaders, loginPage };
+    return { ok, status: response.status, is403, bodySnippet, headers: respHeaders, loginPage, diagKind, hasQueuesTable };
   }
 
   /**
@@ -565,7 +667,8 @@
       throw new Error('SAFETY: Refusing to submit delete action');
     }
 
-    const res = await doQueuePost(url, formToken, submitName, submitValue, csrfContext, 'attempt');
+    const requestMode = csrfContext.headerToken ? 'xhr' : 'form';
+    const res = await doQueuePost(url, formToken, submitName, submitValue, csrfContext, 'attempt', requestMode);
 
     if (!res.ok) {
       // Enhanced diagnostics for failures
@@ -576,24 +679,25 @@
         headerCsrfSource: csrfContext.tokenSource,
         responseHeaders: res.headers,
         bodySnippet: res.bodySnippet,
+        diagKind: res.diagKind,
       };
 
       if (res.is403) {
-        // 403 could be: CSRF mismatch, session expired, or RBAC
         logError(`403 Forbidden for "${queueName}" - diagnostics:`, diagInfo);
-        if (res.loginPage || res.bodySnippet.toLowerCase().includes('login')) {
-          log(`  → Likely session/cookie issue (login page detected)`);
-        } else if (res.bodySnippet.includes('CSRF') || res.bodySnippet.includes('token')) {
-          log(`  → Likely CSRF token mismatch/rotation`);
-        } else {
-          log(`  → Possibly RBAC/permission issue`);
-        }
       } else {
         logError(`HTTP ${res.status} for "${queueName}":`, diagInfo);
       }
     }
 
-    return { ok: res.ok, status: res.status, is403: res.is403, bodySnippet: res.bodySnippet, loginPage: res.loginPage };
+    return {
+      ok: res.ok,
+      status: res.status,
+      is403: res.is403,
+      bodySnippet: res.bodySnippet,
+      loginPage: res.loginPage,
+      diagKind: res.diagKind,
+      hasQueuesTable: res.hasQueuesTable,
+    };
   }
 
   /**
@@ -629,6 +733,8 @@
 
       // Fetch fresh page state (except first pass where we use live DOM)
       let doc;
+      let htmlText = null;
+      let responseHeaders = null;
       if (pass === 1) {
         doc = document;
         log(`Pass ${pass}/${MAX_PASSES}: Using live DOM`);
@@ -638,6 +744,8 @@
         try {
           const fetchResult = await fetchQueuesPageDocument(`pass-${pass}`);
           doc = fetchResult.doc;
+          htmlText = fetchResult.htmlText;
+          responseHeaders = fetchResult.responseHeaders;
           if (fetchResult.loginPage) {
             results.aborted = true;
             results.abortReason = 'Session expired / not authorized (login page detected)';
@@ -651,7 +759,7 @@
       }
 
       // Get header CSRF token (page-global source only, never from form inputs)
-      const { token: headerToken, source: tokenSource } = getHeaderCsrfToken(doc);
+      let { token: headerToken, source: tokenSource } = getHeaderCsrfTokenExtended(doc, htmlText, responseHeaders);
       const csrfContext = {
         headerToken,
         tokenSource,
@@ -660,12 +768,38 @@
       results.stats.headerCsrfSource = tokenSource;
       log(`Pass ${pass} CSRF: headerToken=${headerToken ? tokenPrefix(headerToken) : 'MISSING'}, source=${tokenSource}`);
 
+      if (!headerToken && pass === 1) {
+        log('Pass 1 preflight: header CSRF missing, refreshing page before POSTs...');
+        try {
+          const fetchResult = await fetchQueuesPageDocument('preflight-pass1');
+          doc = fetchResult.doc;
+          htmlText = fetchResult.htmlText;
+          responseHeaders = fetchResult.responseHeaders;
+          if (fetchResult.loginPage) {
+            results.aborted = true;
+            results.abortReason = 'Session expired / not authorized (login page detected)';
+            logError(results.abortReason);
+            break;
+          }
+          const updated = getHeaderCsrfTokenExtended(doc, htmlText, responseHeaders);
+          headerToken = updated.token;
+          tokenSource = updated.source;
+          csrfContext.headerToken = headerToken;
+          csrfContext.tokenSource = tokenSource;
+          results.stats.headerCsrfSource = tokenSource;
+          log(`Preflight CSRF: headerToken=${headerToken ? tokenPrefix(headerToken) : 'MISSING'}, source=${tokenSource}`);
+        } catch (error) {
+          logError('Preflight refresh failed:', error);
+        }
+      }
+
       if (!headerToken) {
         log(`  ⚠ No header CSRF token found - running in body-only mode (higher 403 rate expected)`);
       }
 
       // Get queues that still need action (verbose logging on first pass)
       let actionable = getActionableQueues(doc, actionType, pass === 1 && DEBUG_LEVEL >= 2);
+      const alreadySucceededKeys = new Set();
 
       if (actionable.length === 0) {
         log(`Pass ${pass}/${MAX_PASSES}: All queues ${doneLabel}!`);
@@ -709,11 +843,12 @@
           if (result.ok) {
             results.totalProcessed++;
             logVerbose(`✓ ${actionType} ${queueInfo.queueName}`);
+            alreadySucceededKeys.add(queueInfo.actionPathKey);
           } else if (result.is403) {
             results.stats.initial403Count++;
             last403At = Date.now();
 
-            if (result.loginPage) {
+            if (result.loginPage || result.diagKind === 'LOGIN') {
               results.aborted = true;
               results.abortReason = 'Session expired / not authorized (login page detected on POST)';
               logError(results.abortReason);
@@ -727,13 +862,19 @@
               try {
                 const fetchResult = await fetchQueuesPageDocument('token-refresh');
                 const freshDoc = fetchResult.doc;
+                const freshHtmlText = fetchResult.htmlText;
+                const freshHeaders = fetchResult.responseHeaders;
                 if (fetchResult.loginPage) {
                   results.aborted = true;
                   results.abortReason = 'Session expired / not authorized (login page detected on refresh)';
                   logError(results.abortReason);
                   break;
                 }
-                const { token: freshHeaderToken, source: freshSource } = getHeaderCsrfToken(freshDoc);
+                const { token: freshHeaderToken, source: freshSource } = getHeaderCsrfTokenExtended(
+                  freshDoc,
+                  freshHtmlText,
+                  freshHeaders
+                );
                 csrfContext.headerToken = freshHeaderToken;
                 csrfContext.tokenSource = freshSource;
                 results.stats.tokenRefreshCount++;
@@ -741,30 +882,21 @@
 
                 log(`Token refresh: headerToken=${freshHeaderToken ? tokenPrefix(freshHeaderToken) : 'MISSING'}, source=${freshSource}`);
 
-                // Update this queue's form token from fresh page
+                tokenRefreshedThisPass = true;
+
+                // Retry this queue with fresh tokens (if still actionable)
                 const freshMap = buildQueueTokenMap(freshDoc, actionType);
                 const fresh = freshMap.get(queueInfo.actionPathKey);
                 if (fresh) {
                   queueInfo.formToken = fresh.formToken;
                 }
-
-                // Also update remaining queues' form tokens
-                for (let j = i + 1; j < actionable.length; j++) {
-                  const f = freshMap.get(actionable[j].actionPathKey);
-                  if (f) {
-                    actionable[j].formToken = f.formToken;
-                  }
-                }
-
-                tokenRefreshedThisPass = true;
-
-                // Retry this queue with fresh tokens
                 const retryResult = await submitQueueAction(queueInfo, csrfContext);
                 if (retryResult.ok) {
                   results.totalProcessed++;
                   results.stats.retrySuccessCount++;
                   logVerbose(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
-                } else if (retryResult.is403 && retryResult.loginPage) {
+                  alreadySucceededKeys.add(queueInfo.actionPathKey);
+                } else if (retryResult.is403 && (retryResult.loginPage || retryResult.diagKind === 'LOGIN')) {
                   results.aborted = true;
                   results.abortReason = 'Session expired / not authorized (login page detected after retry)';
                   logError(results.abortReason);
@@ -778,6 +910,11 @@
                   });
                   logError(`Still failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
                 }
+
+                // Rebuild actionable list after refresh to reduce drift
+                actionable = getActionableQueues(freshDoc, actionType, false)
+                  .filter(q => !alreadySucceededKeys.has(q.actionPathKey));
+                i = -1;
               } catch (refreshErr) {
                 tokenRefreshedThisPass = true; // Don't retry refresh on error
                 results.errors.push({
