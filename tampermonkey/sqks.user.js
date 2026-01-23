@@ -1,32 +1,114 @@
+// ==UserScript==
+// @name         Sidekiq Queue Kill Switch
+// @namespace    https://justworks.com/
+// @version      1.0.0
+// @description  Add Pause/Unpause all controls to Sidekiq Enterprise queues
+// @match        *://*/sidekiq/queues*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
 /**
- * Sidekiq Queue Kill Switch - Content Script
+ * Sidekiq Queue Kill Switch - Tampermonkey Port
  *
- * Adds "Pause All" and "Unpause All" controls to the Sidekiq Enterprise Queues page.
- * Safe for oncall use - never deletes queues, only pauses/unpauses.
- *
- * Uses a convergence loop to handle Sidekiq UI eventual consistency:
- * - After each pass, re-fetches page state to verify which queues still need action
- * - Retries until all queues reach desired state or max passes reached
- *
- * CSRF Strategy (v1.0.7 - reverts to 1.0.5 model with hardening):
- * - Body token: always from the specific form's hidden authenticity_token input
- * - Header token: MUST come from page-global source (meta tag or script-embedded)
- * - Never uses hidden form inputs as header token source (they may be masked/per-form)
- * - On first 403 per pass: refresh tokens once and retry
- * - Subsequent 403s in same pass: deferred to next convergence pass
+ * Ported from the Chrome MV3 content script to a userscript so it can
+ * run in-page and potentially avoid 403s caused by extension isolation.
  */
 
 (function() {
   'use strict';
+
+  const STYLE_ID = 'sqks-styles';
+  const STYLE_TEXT = `
+.sqks-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 15px 0;
+  padding: 10px 15px;
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+}
+
+.sqks-btn {
+  padding: 6px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 4px;
+  border: none;
+  transition: opacity 0.2s ease;
+}
+
+.sqks-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sqks-btn.btn-danger {
+  background-color: #dc3545;
+  color: white;
+}
+
+.sqks-btn.btn-danger:hover:not(:disabled) {
+  background-color: #c82333;
+}
+
+.sqks-btn.btn-primary {
+  background-color: #007bff;
+  color: white;
+}
+
+.sqks-btn.btn-primary:hover:not(:disabled) {
+  background-color: #0069d9;
+}
+
+.sqks-status {
+  margin-left: 10px;
+  font-size: 13px;
+  color: #6c757d;
+}
+
+.sqks-status-progress {
+  color: #007bff;
+  font-weight: 500;
+}
+
+.sqks-status-success {
+  color: #28a745;
+  font-weight: 500;
+}
+
+.sqks-status-error {
+  color: #dc3545;
+  font-weight: 500;
+}
+`;
+
+  function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = STYLE_TEXT;
+    document.head.appendChild(style);
+  }
 
   const LOG_PREFIX = '[SQKS]';
   const DEBUG_LEVEL = 2; // 0=quiet, 1=summary/errors, 2=verbose per-queue
   const MAX_PASSES = 5;           // Maximum convergence attempts
   const MAX_TOKEN_REFRESH_PER_PASS = 1;
 
-  // Minimal delays for rate limiting (no CSRF on server)
-  const POST_DELAY_MS = 100;          // Delay between individual POST requests
-  const PASS_DELAY_MS = 500;          // Delay between passes for state to settle
+  // Jittered delays for human-like behavior
+  const POST_DELAY_MIN_MS = 250;      // Min delay between individual POST requests
+  const POST_DELAY_MAX_MS = 900;      // Max delay between individual POST requests
+  const PASS_DELAY_MIN_MS = 1500;     // Min delay between passes
+  const PASS_DELAY_MAX_MS = 3500;     // Max delay between passes
+  const ERROR_BACKOFF_MIN_MS = 2000;  // Min backoff after errors
+  const ERROR_BACKOFF_MAX_MS = 4000;  // Max backoff after errors
+  const RECENT_403_WINDOW_MS = 2000;
+  const RECENT_403_EXTRA_DELAY_MIN_MS = 1200;
+  const RECENT_403_EXTRA_DELAY_MAX_MS = 1800;
   const LIVE_DOM_RECHECK_INTERVAL = 4;
   const ENABLE_LIVE_DOM_RECHECK = true;
   const REQUEST_CREDENTIALS = 'include';
@@ -57,6 +139,20 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  /**
+   * Random integer in range [min, max] inclusive
+   */
+  function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  /**
+   * Sleep with jitter - random duration between minMs and maxMs
+   */
+  function sleepJitter(minMs, maxMs) {
+    const duration = randomInt(minMs, maxMs);
+    return sleep(duration);
+  }
 
   /**
    * Log helper with consistent prefix
@@ -303,7 +399,7 @@
       if (isTokenLike(redacted)) {
         return tokenPrefix(redacted);
       }
-      return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
+      return redacted.length > 500 ? `${redacted.slice(0, 500)}...` : redacted;
     }
     if (value && typeof value === 'object') {
       if (value instanceof Error) {
@@ -364,7 +460,46 @@
     if (!currentRun) return;
     currentRun.endedAt = new Date().toISOString();
     currentRun.results = results || null;
+    currentRun.harTrace = collectHarLikeTrace();
+    downloadRunLog(currentRun);
     currentRun = null;
+  }
+
+  function collectHarLikeTrace() {
+    if (!performance || typeof performance.getEntriesByType !== 'function') {
+      return [];
+    }
+    try {
+      const entries = performance.getEntriesByType('resource') || [];
+      return entries
+        .filter(entry => entry.name && entry.name.includes('/sidekiq/queues/'))
+        .map(entry => ({
+          name: entry.name,
+          initiatorType: entry.initiatorType,
+          startTime: entry.startTime,
+          duration: entry.duration,
+          transferSize: entry.transferSize,
+          encodedBodySize: entry.encodedBodySize,
+          decodedBodySize: entry.decodedBodySize,
+        }));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function downloadRunLog(run) {
+    try {
+      const payload = JSON.stringify(run, null, 2);
+      const blob = new Blob([payload], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sqks-run-${run.id}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.error(LOG_PREFIX, 'Failed to download run log', e);
+    }
   }
 
   /**
@@ -604,9 +739,8 @@
       }
 
       const formToken = getAuthenticityToken(form);
-      // Accept empty string tokens (CSRF disabled on server per sidekiq/sidekiq#6739)
-      if (formToken === null) {
-        logError(`No authenticity token input for queue: ${queueName}`);
+      if (!formToken) {
+        logError(`No authenticity token for queue: ${queueName}`);
         formsNoToken++;
         continue;
       }
@@ -741,7 +875,7 @@
       : 'strict-origin-when-cross-origin';
 
     logVerbose(
-      `[${attemptLabel}] POST ${url.pathname} → ${submitName}=${submitValue}`,
+      `[${attemptLabel}] POST ${url.pathname} -> ${submitName}=${submitValue}`,
       `(bodyToken=${bodyTokenPrefix}, headerToken=${headerTokenPrefix}, headerSource=${csrfContext.tokenSource})`
     );
     logVerbose(
@@ -1077,7 +1211,7 @@
       }
 
       if (!headerToken) {
-        log(`  ⚠ No header CSRF token found - running in body-only mode (higher 403 rate expected)`);
+        log('  WARNING: No header CSRF token found - running in body-only mode (higher 403 rate expected)');
       }
 
       // Get queues that still need action (verbose logging on first pass)
@@ -1098,6 +1232,9 @@
       // Track token refresh for this pass (at most one refresh per pass)
       let tokenRefreshedThisPass = false;
 
+      // Process each actionable queue
+      let last403At = 0;
+
       for (let i = 0; i < actionable.length; i++) {
         const queueInfo = actionable[i];
         const progressMsg = `Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${i + 1}/${actionable.length} (${queueInfo.queueName})`;
@@ -1112,12 +1249,17 @@
           }
         }
 
+        const since403 = Date.now() - last403At;
+        if (last403At > 0 && since403 < RECENT_403_WINDOW_MS) {
+          await sleepJitter(RECENT_403_EXTRA_DELAY_MIN_MS, RECENT_403_EXTRA_DELAY_MAX_MS);
+        }
+
         try {
           const result = await submitQueueAction(queueInfo, csrfContext, actionType);
 
           if (result.ok) {
             results.totalProcessed++;
-            logVerbose(`✓ ${actionType} ${queueInfo.queueName}`);
+            logVerbose(`OK ${actionType} ${queueInfo.queueName}`);
             alreadySucceededKeys.add(queueInfo.actionPathKey);
 
             if (result.freshDoc) {
@@ -1133,6 +1275,7 @@
             }
           } else if (result.is403) {
             results.stats.initial403Count++;
+            last403At = Date.now();
 
             if (result.loginPage || result.diagKind === 'LOGIN') {
               results.aborted = true;
@@ -1180,7 +1323,7 @@
                 if (retryResult.ok) {
                   results.totalProcessed++;
                   results.stats.retrySuccessCount++;
-                  logVerbose(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
+                  logVerbose(`OK ${actionType} ${queueInfo.queueName} (after token refresh)`);
                   alreadySucceededKeys.add(queueInfo.actionPathKey);
                 } else if (retryResult.is403 && (retryResult.loginPage || retryResult.diagKind === 'LOGIN')) {
                   results.aborted = true;
@@ -1192,7 +1335,7 @@
                   results.errors.push({
                     queue: queueInfo.queueName,
                     error: `HTTP ${retryResult.status} after token refresh (likely RBAC/permission)`,
-                    pass
+                    pass,
                   });
                   logError(`Still failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
                 }
@@ -1206,7 +1349,7 @@
                 results.errors.push({
                   queue: queueInfo.queueName,
                   error: `403 + refresh failed: ${refreshErr.message}`,
-                  pass
+                  pass,
                 });
                 logError(`Token refresh failed for ${queueInfo.queueName}:`, refreshErr);
               }
@@ -1220,7 +1363,7 @@
             results.errors.push({
               queue: queueInfo.queueName,
               error: `HTTP ${result.status}`,
-              pass
+              pass,
             });
             logError(`Failed: ${queueInfo.queueName} - HTTP ${result.status}`);
           }
@@ -1228,14 +1371,15 @@
           results.errors.push({
             queue: queueInfo.queueName,
             error: String(error.message || error),
-            pass
+            pass,
           });
           logError(`Error processing ${queueInfo.queueName}:`, error);
+          await sleepJitter(ERROR_BACKOFF_MIN_MS, ERROR_BACKOFF_MAX_MS);
         }
 
-        // Brief delay between requests for rate limiting
+        // Jittered delay between requests (except after last one)
         if (i < actionable.length - 1) {
-          await sleep(POST_DELAY_MS);
+          await sleepJitter(POST_DELAY_MIN_MS, POST_DELAY_MAX_MS);
         }
       }
 
@@ -1243,10 +1387,10 @@
         break;
       }
 
-      // If not the last pass, wait for server state to settle
+      // If not the last pass, wait with jitter for server state to settle
       if (pass < MAX_PASSES) {
-        log(`Waiting for server state to settle...`);
-        await sleep(PASS_DELAY_MS);
+        log('Waiting for server state to settle...');
+        await sleepJitter(PASS_DELAY_MIN_MS, PASS_DELAY_MAX_MS);
       }
     }
 
@@ -1363,7 +1507,7 @@
       }
 
       statusElement.textContent = resultMessage;
-      log(`Final results:`, results);
+      log('Final results:', results);
 
       // Refresh page after a brief delay to show the status
       setTimeout(() => {
@@ -1449,6 +1593,7 @@
 
   // Initialize
   try {
+    injectStyles();
     injectControls();
   } catch (error) {
     logError('Failed to initialize:', error);

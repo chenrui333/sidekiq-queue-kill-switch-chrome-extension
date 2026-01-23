@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.3.0] - 2025-01-24
+
+### Changed
+- Simplified delays now that CSRF is disabled on server (100ms between POSTs, 500ms between passes)
+- Removed jittered/randomized delays (no longer needed for CSRF workarounds)
+
+### Removed
+- HAR-like resource trace collection (no longer needed for debugging)
+- Auto-download of run diagnostics logs (no longer needed)
+- 403-specific extra delays and backoff logic
+- Error backoff delays (server is reliable without CSRF)
+
 ## [1.1.3] - 2025-01-24
 
 ### Fixed
