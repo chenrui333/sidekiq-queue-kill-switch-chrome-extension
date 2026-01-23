@@ -95,7 +95,7 @@ jobs:
           required_functions = [
               'findSubmitButton',
               'getAuthenticityToken',
-              'submitFormAction',
+              'submitQueueAction',
               'handleBulkAction',
               'injectControls'
           ]
