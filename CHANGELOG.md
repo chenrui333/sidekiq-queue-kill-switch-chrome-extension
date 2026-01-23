@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.1.3] - 2025-01-24
+
+### Fixed
+- Accept empty authenticity_token values when CSRF is disabled on server (ref: [sidekiq/sidekiq#6739](https://github.com/sidekiq/sidekiq/issues/6739))
+- Changed token validation from falsy check to null check to support empty string tokens
+
 ## [1.1.2] - 2025-01-24
 
 ### Fixed

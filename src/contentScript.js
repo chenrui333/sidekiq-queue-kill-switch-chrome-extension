@@ -664,8 +664,9 @@
       }
 
       const formToken = getAuthenticityToken(form);
-      if (!formToken) {
-        logError(`No authenticity token for queue: ${queueName}`);
+      // Accept empty string tokens (CSRF disabled on server per sidekiq/sidekiq#6739)
+      if (formToken === null) {
+        logError(`No authenticity token input for queue: ${queueName}`);
         formsNoToken++;
         continue;
       }
