@@ -919,7 +919,19 @@
           hasQueuesTable: nativeRes.hasQueuesTable,
         };
       }
-    } else if (!effectiveActionType) {
+      // Native form was attempted but didn't succeed - don't fallback to fetch (avoids double-submit)
+      return {
+        ok: false,
+        status: 0,
+        is403: false,
+        bodySnippet: '',
+        loginPage: false,
+        diagKind: nativeRes.reason || 'NATIVE_FAILED',
+        hasQueuesTable: nativeRes.hasQueuesTable,
+      };
+    }
+
+    if (!effectiveActionType) {
       logVerbose(`[native] skip ${queueName} missing actionType`);
     }
 

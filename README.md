@@ -64,12 +64,10 @@ The extension:
 
 1. Detects the Sidekiq Queues page by looking for `table.queues`
 2. Enumerates all queue forms that need action (have pause/unpause button)
-3. For each queue, submits the same POST request that the button would send
-4. Uses the page's authenticity token (CSRF protection via body param + X-CSRF-Token header)
-5. Rate-limits requests with jitter (250–900ms between POSTs) to avoid server overload
-6. **Verifies and retries**: Re-fetches page state (waiting 1.5–3.5s between passes) and retries any queues that didn't change (up to 5 passes) to handle Sidekiq's eventual consistency
-7. On errors, backs off 2–4s before continuing
-8. Refreshes the page to show updated state
+3. For each queue, submits the form via native HTML submission (hidden iframe)
+4. Rate-limits requests (100ms between POSTs) to avoid server overload
+5. **Verifies and retries**: Re-fetches page state (500ms between passes) and retries any queues that didn't change (up to 5 passes) to handle Sidekiq's eventual consistency
+6. Refreshes the page on success to show updated state
 
 ### Safety Features
 
@@ -92,7 +90,7 @@ The extension:
 
 - Make sure you're logged into Sidekiq
 - Try refreshing the page
-- The CSRF token may have expired - reload and try again
+- Verify the page has queue forms with authenticity_token inputs
 
 ### Some queues fail to pause/unpause
 

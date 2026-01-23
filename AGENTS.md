@@ -37,26 +37,21 @@ Sidekiq UI has eventual consistency - queue state may not update immediately aft
 The extension handles this with a verification + retry loop:
 - After each pass, re-fetches page HTML to check which queues still need action
 - Retries remaining queues up to MAX_PASSES (5)
-- Jittered delay between passes (1500-3500ms) to let server state settle
-- Jittered delay between individual requests (250-900ms)
-- Error backoff with jitter (2000-4000ms) after failed requests
+- Fixed 500ms delay between passes to let server state settle
+- Fixed 100ms delay between individual requests for rate limiting
 
-### CSRF Token Handling
-Rails CSRF protection requires two tokens:
-- **Body param**: `authenticity_token` from form's hidden input (per-form)
-- **Header**: `X-CSRF-Token` from page's `meta[name="csrf-token"]` (page-wide)
-
-The extension uses the meta token for headers (Rails validates against this) and form token for body.
-On 403 Forbidden, it refreshes tokens by re-fetching the page and retries once - if still 403,
-it's likely a permission/RBAC issue rather than CSRF.
+### Native Form Submission
+The extension uses native HTML form submission via a hidden iframe (preferred method):
+- Submits forms exactly as the browser would
+- No CSRF issues since it uses the page's actual form
+- Falls back gracefully if form/button is missing
 
 ### Safety Rules
 1. **Never send delete parameter** - Multiple guards at every level
 2. **ALLOWED_ACTIONS allowlist** - Only 'pause' and 'unpause' permitted
 3. **Read button state from DOM** - Don't hardcode pause/unpause values
-4. **Use page's CSRF tokens** - Meta token for header, form token for body
-5. **Rate limit requests** - Jittered delays (250-900ms) between POSTs
-6. **Single retry on 403** - Refresh tokens once, then treat as permission error
+4. **Rate limit requests** - 100ms delay between POSTs
+5. **No double-submit** - Native form submission doesn't fall back to fetch
 
 ### Console Logging
 All logs prefixed with `[SQKS]` for easy filtering in DevTools.
