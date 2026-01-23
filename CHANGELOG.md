@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2025-01-23
+
+### Fixed
+- HTTP 403 Forbidden errors on bulk pause/unpause by adding Rails-compatible CSRF headers
+- POST requests now include `X-CSRF-Token` header (required by some Rails CSRF strategies)
+- POST requests now include `X-Requested-With: XMLHttpRequest` header
+- Added proper `Referer` and `referrerPolicy` to mimic browser form submission
+
+### Improved
+- Enhanced error logging: on 403/error, logs response body (first 200 chars) and headers for debugging
+- Changed `credentials` from `same-origin` to `include` for broader cookie handling
+
 ## [1.0.2] - 2025-01-23
 
 ### Fixed

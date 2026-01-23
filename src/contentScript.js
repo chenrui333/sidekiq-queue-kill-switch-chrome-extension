@@ -237,6 +237,20 @@
   }
 
   /**
+   * Build headers that mimic a real browser form submission for Rails CSRF
+   * @param {string} token - The CSRF authenticity token
+   * @returns {Object} Headers object for fetch
+   */
+  function buildRailsHeaders(token) {
+    return {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'X-CSRF-Token': token,
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+  }
+
+  /**
    * Submit an action for a single queue
    */
   async function submitQueueAction(queueInfo) {
@@ -256,18 +270,31 @@
 
     const response = await fetch(url.toString(), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: buildRailsHeaders(token),
       body: body.toString(),
-      credentials: 'same-origin',
+      credentials: 'include',
       redirect: 'follow',
+      referrer: window.location.href,
+      referrerPolicy: 'strict-origin-when-cross-origin',
     });
 
     // Rails typically returns 302 redirect on success
     // fetch with redirect: 'follow' will follow it and return 200
     if (!response.ok && response.status !== 302) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      // On error, try to extract response body for debugging
+      let errorDetail = '';
+      try {
+        const text = await response.text();
+        errorDetail = text.substring(0, 200);
+        logError(`Response body (first 200 chars):`, errorDetail);
+        logError(`Response headers:`, {
+          contentType: response.headers.get('content-type'),
+          location: response.headers.get('location'),
+        });
+      } catch (e) {
+        // Ignore read errors
+      }
+      throw new Error(`HTTP ${response.status}: ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
     }
 
     return true;
