@@ -36,6 +36,10 @@
   const NATIVE_FORM_ACTIONS = ['pause', 'unpause'];
   const IFRAME_SUBMIT_TIMEOUT_MS = 6000;
 
+  // Performance optimization flags
+  const ENABLE_RUN_LOGS = DEBUG_LEVEL >= 2;  // Gate expensive run log collection
+  const PERF_ENABLED = DEBUG_LEVEL >= 1;     // Enable performance instrumentation
+
   // Allowed action types - explicit allowlist for safety
   const ALLOWED_ACTIONS = ['pause', 'unpause'];
   const LOGIN_MARKERS = [
@@ -50,6 +54,12 @@
   let bulkActionInProgress = false;
   let currentRun = null;
 
+  // Performance tracking
+  let perfMetrics = null;
+
+  // Form index cache for O(1) lookups (rebuilt per pass)
+  let formIndexCache = null;
+
   /**
    * Sleep helper
    */
@@ -57,6 +67,109 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  /**
+   * Performance instrumentation helpers
+   */
+  function perfStart() {
+    if (!PERF_ENABLED) return;
+    perfMetrics = {
+      runStart: performance.now(),
+      parseTime: 0,
+      enumerateTime: 0,
+      indexBuildTime: 0,
+      passTimings: [],
+      domQueries: 0,
+      formIndexHits: 0,
+      formIndexMisses: 0,
+    };
+  }
+
+  function perfMark(metric, duration) {
+    if (!PERF_ENABLED || !perfMetrics) return;
+    if (typeof perfMetrics[metric] === 'number') {
+      perfMetrics[metric] += duration;
+    }
+  }
+
+  function perfIncr(metric) {
+    if (!PERF_ENABLED || !perfMetrics) return;
+    if (typeof perfMetrics[metric] === 'number') {
+      perfMetrics[metric]++;
+    }
+  }
+
+  function perfLogSummary() {
+    if (!PERF_ENABLED || !perfMetrics) return;
+    const total = performance.now() - perfMetrics.runStart;
+    console.log(LOG_PREFIX, `[PERF] Total: ${total.toFixed(1)}ms`,
+      `| Parse: ${perfMetrics.parseTime.toFixed(1)}ms`,
+      `| Enumerate: ${perfMetrics.enumerateTime.toFixed(1)}ms`,
+      `| IndexBuild: ${perfMetrics.indexBuildTime.toFixed(1)}ms`,
+      `| DOMQueries: ${perfMetrics.domQueries}`,
+      `| IndexHits: ${perfMetrics.formIndexHits}`,
+      `| IndexMisses: ${perfMetrics.formIndexMisses}`
+    );
+    perfMetrics = null;
+  }
+
+  /**
+   * Build form index from a document for O(1) lookups
+   * Maps actionPathKey -> { form, token, pauseBtn, unpauseBtn }
+   */
+  function buildFormIndex(doc) {
+    const start = PERF_ENABLED ? performance.now() : 0;
+    const index = new Map();
+    const table = doc.querySelector('table.queues');
+    if (!table) {
+      perfMark('indexBuildTime', PERF_ENABLED ? performance.now() - start : 0);
+      return index;
+    }
+
+    perfIncr('domQueries');
+    const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
+
+    for (const form of forms) {
+      const action = form.getAttribute('action');
+      if (!action) continue;
+
+      const actionPathKey = normalizeActionPathKey(action);
+      const tokenInput = form.querySelector('input[name="authenticity_token"]');
+      const token = tokenInput ? tokenInput.value : null;
+
+      // Find both pause and unpause buttons for this form
+      const pauseBtn = form.querySelector('input[type="submit"][name="pause"], button[name="pause"]');
+      const unpauseBtn = form.querySelector('input[type="submit"][name="unpause"], button[name="unpause"]');
+
+      index.set(actionPathKey, {
+        form,
+        token,
+        pauseBtn,
+        unpauseBtn,
+        queueName: getQueueNameFromAction(action),
+        action,
+      });
+    }
+
+    perfMark('indexBuildTime', PERF_ENABLED ? performance.now() - start : 0);
+    return index;
+  }
+
+  /**
+   * Build form index for live DOM and cache it
+   */
+  function getLiveFormIndex() {
+    if (!formIndexCache) {
+      formIndexCache = buildFormIndex(document);
+    }
+    return formIndexCache;
+  }
+
+  /**
+   * Invalidate the live form index cache (call after DOM changes)
+   */
+  function invalidateFormIndexCache() {
+    formIndexCache = null;
+  }
 
   /**
    * Log helper with consistent prefix
@@ -108,15 +221,17 @@
   }
 
   function findLiveFormForQueue(actionPathKey, actionType) {
-    const forms = document.querySelectorAll('form[action*="/sidekiq/queues/"]');
-    for (const form of forms) {
-      const action = form.getAttribute('action') || '';
-      if (normalizeActionPathKey(action) !== actionPathKey) {
-        continue;
-      }
-      const submitButton = findSubmitButton(form, actionType);
-      return { form, submitButton };
+    // Use form index for O(1) lookup instead of O(N) DOM scanning
+    const index = getLiveFormIndex();
+    const entry = index.get(actionPathKey);
+
+    if (entry) {
+      perfIncr('formIndexHits');
+      const submitButton = actionType === 'pause' ? entry.pauseBtn : entry.unpauseBtn;
+      return { form: entry.form, submitButton };
     }
+
+    perfIncr('formIndexMisses');
     return null;
   }
 
@@ -329,7 +444,8 @@
   }
 
   function appendRunLog(level, args) {
-    if (!currentRun) return;
+    // Gate expensive run log collection behind ENABLE_RUN_LOGS
+    if (!ENABLE_RUN_LOGS || !currentRun) return;
     const items = Array.from(args || []);
     let data = null;
     if (items.length > 0 && typeof items[items.length - 1] === 'object') {
@@ -525,6 +641,7 @@
   /**
    * Fetch the queues page and parse it into a document
    * Returns a parsed Document for querying fresh DOM state
+   * Also builds form index for efficient subsequent operations
    */
   async function fetchQueuesPageDocument(contextLabel = 'refresh') {
     const response = await fetch(window.location.href, {
@@ -536,8 +653,12 @@
     });
 
     const html = await response.text();
+    const parseStart = PERF_ENABLED ? performance.now() : 0;
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
+    perfMark('parseTime', PERF_ENABLED ? performance.now() - parseStart : 0);
+    perfIncr('domQueries');
+
     const loginPage = looksLikeLoginPageFromDoc(doc) || looksLikeLoginPageFromText(html);
     const hasQueuesTable = !!doc.querySelector('table.queues');
     const responseHeaders = {
@@ -545,11 +666,14 @@
     };
     const { token: headerToken, source: tokenSource } = getHeaderCsrfTokenExtended(doc, html, responseHeaders);
 
+    // Build form index once for this parsed document
+    const formIndex = hasQueuesTable ? buildFormIndex(doc) : null;
+
     log(
       `[${contextLabel}] GET status=${response.status} loginPage=${loginPage} table.queues=${hasQueuesTable}`,
       `headerCsrf=${tokenSource}:${tokenPrefix(headerToken)}`
     );
-    if (currentRun) {
+    if (ENABLE_RUN_LOGS && currentRun) {
       currentRun.refreshes.push({
         ts: new Date().toISOString(),
         label: contextLabel,
@@ -564,21 +688,23 @@
       logError(`[${contextLabel}] GET non-OK status=${response.status}`);
     }
 
-    return { doc, htmlText: html, loginPage, status: response.status, ok: response.ok, responseHeaders };
+    return { doc, htmlText: html, loginPage, status: response.status, ok: response.ok, responseHeaders, formIndex };
   }
 
   /**
    * Get actionable queue forms from a document (live DOM or fetched)
    * Returns array of queue info objects for queues that still need the specified action
+   *
+   * @param {Document} doc - Document to search (live DOM or parsed)
+   * @param {string} actionType - 'pause' or 'unpause'
+   * @param {boolean} verbose - Enable verbose logging
+   * @param {Map} formIndex - Optional pre-built form index for efficiency
    */
-  function getActionableQueues(doc, actionType, verbose = false) {
-    const table = doc.querySelector('table.queues');
-    if (!table) {
-      if (verbose) logVerbose('No table.queues found in document');
-      return [];
-    }
+  function getActionableQueues(doc, actionType, verbose = false, formIndex = null) {
+    const start = PERF_ENABLED ? performance.now() : 0;
 
-    const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
+    // Use provided index or build one
+    const index = formIndex || buildFormIndex(doc);
     const actionable = [];
 
     // Counters for observability
@@ -586,10 +712,9 @@
     let formsNoMatchingAction = 0;
     let formsNoToken = 0;
 
-    for (const form of forms) {
-      const action = form.getAttribute('action');
-      const queueName = getQueueNameFromAction(action);
-      const submitButton = findSubmitButton(form, actionType);
+    for (const [actionPathKey, entry] of index) {
+      const { form, token, pauseBtn, unpauseBtn, queueName, action } = entry;
+      const submitButton = actionType === 'pause' ? pauseBtn : unpauseBtn;
 
       // If no submit button for this action, queue is already in desired state
       if (!submitButton) {
@@ -603,9 +728,8 @@
         continue;
       }
 
-      const formToken = getAuthenticityToken(form);
       // Accept empty string tokens (CSRF disabled on server per sidekiq/sidekiq#6739)
-      if (formToken === null) {
+      if (token === null) {
         logError(`No authenticity token input for queue: ${queueName}`);
         formsNoToken++;
         continue;
@@ -636,8 +760,8 @@
       actionable.push({
         queueName,
         action,
-        actionPathKey: normalizeActionPathKey(action), // Used to re-find form after page refetch
-        formToken,             // For POST body authenticity_token param
+        actionPathKey, // Used to re-find form after page refetch
+        formToken: token,      // For POST body authenticity_token param
         submitName,
         submitValue: submitValue || submitName, // Fallback to name if value missing
         actionType,
@@ -645,21 +769,26 @@
     }
 
     if (verbose) {
-      logVerbose(`Enumeration: ${forms.length} total forms, ${actionable.length} actionable for "${actionType}"`);
+      logVerbose(`Enumeration: ${index.size} total forms, ${actionable.length} actionable for "${actionType}"`);
       logVerbose(`  - Already in desired state: ${formsNoMatchingAction}`);
       logVerbose(`  - Delete-only forms: ${formsWithDelete}`);
       logVerbose(`  - Missing token: ${formsNoToken}`);
     }
 
+    perfMark('enumerateTime', PERF_ENABLED ? performance.now() - start : 0);
     return actionable;
   }
 
   /**
    * Build a map of actionPathKey -> queue info from a document
    * Used to update tokens for remaining queues after a refresh
+   *
+   * @param {Document} doc - Document to search
+   * @param {string} actionType - 'pause' or 'unpause'
+   * @param {Map} formIndex - Optional pre-built form index for efficiency
    */
-  function buildQueueTokenMap(doc, actionType) {
-    const actionable = getActionableQueues(doc, actionType, false);
+  function buildQueueTokenMap(doc, actionType, formIndex = null) {
+    const actionable = getActionableQueues(doc, actionType, false, formIndex);
     const map = new Map();
     for (const q of actionable) {
       map.set(q.actionPathKey, q);
@@ -1030,8 +1159,12 @@
       let doc;
       let htmlText = null;
       let responseHeaders = null;
+      let passFormIndex = null;  // Form index for this pass
+
       if (pass === 1) {
         doc = document;
+        invalidateFormIndexCache();  // Ensure fresh cache for first pass
+        passFormIndex = getLiveFormIndex();
         log(`Pass ${pass}/${MAX_PASSES}: Using live DOM`);
       } else {
         log(`Pass ${pass}/${MAX_PASSES}: Fetching fresh page state...`);
@@ -1041,6 +1174,7 @@
           doc = fetchResult.doc;
           htmlText = fetchResult.htmlText;
           responseHeaders = fetchResult.responseHeaders;
+          passFormIndex = fetchResult.formIndex;  // Use pre-built index from fetch
           if (fetchResult.loginPage) {
             results.aborted = true;
             results.abortReason = 'Session expired / not authorized (login page detected)';
@@ -1050,6 +1184,8 @@
         } catch (error) {
           logError(`Failed to fetch page state:`, error);
           doc = document;
+          invalidateFormIndexCache();
+          passFormIndex = getLiveFormIndex();
         }
       }
 
@@ -1093,7 +1229,8 @@
       }
 
       // Get queues that still need action (verbose logging on first pass)
-      let actionable = getActionableQueues(doc, actionType, pass === 1 && DEBUG_LEVEL >= 2);
+      // Use form index for efficient enumeration
+      let actionable = getActionableQueues(doc, actionType, pass === 1 && DEBUG_LEVEL >= 2, passFormIndex);
       const alreadySucceededKeys = new Set();
 
       if (actionable.length === 0) {
@@ -1116,9 +1253,15 @@
         updateStatus(progressMsg);
 
         if (ENABLE_LIVE_DOM_RECHECK && i > 0 && i % LIVE_DOM_RECHECK_INTERVAL === 0) {
-          const liveActionable = getActionableQueues(document, actionType, false);
-          const liveKeys = new Set(liveActionable.map(q => q.actionPathKey));
-          if (!liveKeys.has(queueInfo.actionPathKey)) {
+          // Use cheap targeted check instead of full enumeration
+          // Just check if the specific queue's action button still exists
+          invalidateFormIndexCache(); // Refresh cache for accurate check
+          const liveIndex = getLiveFormIndex();
+          const liveEntry = liveIndex.get(queueInfo.actionPathKey);
+          const liveSubmitBtn = liveEntry
+            ? (actionType === 'pause' ? liveEntry.pauseBtn : liveEntry.unpauseBtn)
+            : null;
+          if (!liveSubmitBtn) {
             logVerbose(`Skipping ${queueInfo.queueName} (already in desired state per live DOM)`);
             continue;
           }
@@ -1139,8 +1282,12 @@
                 csrfContext.tokenSource = updated.source;
                 results.stats.headerCsrfSource = updated.source;
               }
-              actionable = getActionableQueues(result.freshDoc, actionType, false)
+              // Rebuild form index from fresh doc
+              const freshFormIndex = buildFormIndex(result.freshDoc);
+              actionable = getActionableQueues(result.freshDoc, actionType, false, freshFormIndex)
                 .filter(q => !alreadySucceededKeys.has(q.actionPathKey));
+              // Also invalidate live form cache since page state changed
+              invalidateFormIndexCache();
               i = -1;
             }
           } else if (result.is403) {
@@ -1182,8 +1329,11 @@
 
                 tokenRefreshedThisPass = true;
 
+                // Build form index for fresh doc
+                const refreshFormIndex = fetchResult.formIndex || buildFormIndex(freshDoc);
+
                 // Retry this queue with fresh tokens (if still actionable)
-                const freshMap = buildQueueTokenMap(freshDoc, actionType);
+                const freshMap = buildQueueTokenMap(freshDoc, actionType, refreshFormIndex);
                 const fresh = freshMap.get(queueInfo.actionPathKey);
                 if (fresh) {
                   queueInfo.formToken = fresh.formToken;
@@ -1209,9 +1359,10 @@
                   logError(`Still failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
                 }
 
-                // Rebuild actionable list after refresh to reduce drift
-                actionable = getActionableQueues(freshDoc, actionType, false)
+                // Rebuild actionable list after refresh to reduce drift (reuse form index)
+                actionable = getActionableQueues(freshDoc, actionType, false, refreshFormIndex)
                   .filter(q => !alreadySucceededKeys.has(q.actionPathKey));
+                invalidateFormIndexCache();
                 i = -1;
               } catch (refreshErr) {
                 tokenRefreshedThisPass = true; // Don't retry refresh on error
@@ -1342,6 +1493,7 @@
     statusElement.textContent = `${actionLabel}ing...`;
     statusElement.className = 'sqks-status sqks-status-progress';
     bulkActionInProgress = true;
+    perfStart();  // Start performance tracking
     startRun(actionType, { totalQueues, initialActionable: initialActionable.length });
 
     let finalResults = null;
@@ -1392,6 +1544,7 @@
     } finally {
       buttons.forEach(btn => btn.disabled = false);
       bulkActionInProgress = false;
+      perfLogSummary();  // Log performance metrics
       endRun(finalResults);
     }
   }

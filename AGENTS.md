@@ -56,6 +56,15 @@ The extension uses native HTML form submission via a hidden iframe (preferred me
 ### Console Logging
 All logs prefixed with `[SQKS]` for easy filtering in DevTools.
 
+### Performance Optimizations (v1.4.0+)
+The extension is optimized for pages with many queues (hundreds+):
+- **Form Index**: Per-pass `buildFormIndex()` creates O(1) lookup map, eliminating O(N²) DOM scanning
+- **Index Caching**: Live DOM index cached via `getLiveFormIndex()`, invalidated strategically
+- **Efficient Enumeration**: `getActionableQueues()` reuses form index from `fetchQueuesPageDocument()`
+- **Cheap Live Recheck**: Checks only specific queue's button instead of full enumeration
+- **Gated Logging**: `ENABLE_RUN_LOGS` (tied to `DEBUG_LEVEL >= 2`) skips expensive JSON sanitization
+- **Performance Metrics**: When `PERF_ENABLED` is true, logs timing summary after each run
+
 ## Development Workflow
 
 ```bash
