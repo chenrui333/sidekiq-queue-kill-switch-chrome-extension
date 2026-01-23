@@ -1,0 +1,192 @@
+# CI workflow for Sidekiq Queue Kill Switch Chrome Extension
+#
+# Runs on PRs and pushes to main. Validates the extension structure,
+# runs sanity checks, and verifies the package builds successfully.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Read-only permissions for CI
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate manifest.json structure
+        run: |
+          echo "Checking manifest.json..."
+
+          # Use python3 to parse and validate JSON (more portable than jq)
+          python3 << 'EOF'
+          import json
+          import sys
+
+          with open('manifest.json', 'r') as f:
+              manifest = json.load(f)
+
+          errors = []
+
+          # Check manifest_version is 3
+          if manifest.get('manifest_version') != 3:
+              errors.append(f"manifest_version must be 3, got: {manifest.get('manifest_version')}")
+
+          # Check content_scripts exists and has correct match pattern
+          content_scripts = manifest.get('content_scripts', [])
+          if not content_scripts:
+              errors.append("content_scripts array is missing or empty")
+          else:
+              matches = content_scripts[0].get('matches', [])
+              expected_pattern = "*://*/sidekiq/queues*"
+              if expected_pattern not in matches:
+                  errors.append(f"content_scripts matches must include '{expected_pattern}', got: {matches}")
+
+          # Check version field exists and is valid
+          version = manifest.get('version')
+          if not version:
+              errors.append("version field is missing")
+          elif not all(part.isdigit() for part in version.split('.')):
+              errors.append(f"version must be semver format (e.g., 1.0.0), got: {version}")
+
+          # Check required fields
+          for field in ['name', 'description']:
+              if not manifest.get(field):
+                  errors.append(f"Required field '{field}' is missing or empty")
+
+          if errors:
+              print("::error::Manifest validation failed:")
+              for error in errors:
+                  print(f"  - {error}")
+              sys.exit(1)
+
+          print(f"✓ manifest.json is valid (version: {version}, MV3)")
+          EOF
+
+      - name: Validate contentScript.js structure
+        run: |
+          echo "Checking src/contentScript.js..."
+
+          python3 << 'EOF'
+          import sys
+
+          with open('src/contentScript.js', 'r') as f:
+              content = f.read()
+
+          errors = []
+
+          # Check LOG_PREFIX constant exists with [SQKS]
+          if "LOG_PREFIX = '[SQKS]'" not in content and 'LOG_PREFIX = "[SQKS]"' not in content:
+              errors.append("LOG_PREFIX constant with '[SQKS]' value not found")
+
+          # Check key safety functions exist
+          required_functions = [
+              'findSubmitButton',
+              'getAuthenticityToken',
+              'submitFormAction',
+              'handleBulkAction',
+              'injectControls'
+          ]
+          for func in required_functions:
+              if f'function {func}' not in content:
+                  errors.append(f"Required function '{func}' not found")
+
+          # Check delete safety guard exists
+          if 'delete' not in content.lower():
+              errors.append("Delete safety guard check not found")
+
+          if errors:
+              print("::error::contentScript.js validation failed:")
+              for error in errors:
+                  print(f"  - {error}")
+              sys.exit(1)
+
+          print("✓ src/contentScript.js structure is valid")
+          EOF
+
+      - name: Validate CSS file exists
+        run: |
+          if [ ! -f "src/contentScript.css" ]; then
+            echo "::error::src/contentScript.css not found"
+            exit 1
+          fi
+          echo "✓ src/contentScript.css exists"
+
+      - name: Validate icons exist
+        run: |
+          for size in 16 32 48 128; do
+            if [ ! -f "icons/icon${size}.png" ]; then
+              echo "::error::icons/icon${size}.png not found"
+              exit 1
+            fi
+          done
+          echo "✓ All required icons exist"
+
+      - name: Build extension package
+        run: make package
+
+      - name: Verify ZIP contents
+        run: |
+          echo "Verifying ZIP contents..."
+
+          # Check ZIP was created
+          if [ ! -f "dist/sidekiq-queue-kill-switch.zip" ]; then
+            echo "::error::ZIP file not found"
+            exit 1
+          fi
+
+          # List contents
+          unzip -l dist/sidekiq-queue-kill-switch.zip
+
+          # Verify required files are in ZIP
+          python3 << 'EOF'
+          import zipfile
+          import sys
+
+          required_files = [
+              'manifest.json',
+              'src/contentScript.js',
+              'src/contentScript.css',
+              'icons/icon16.png',
+              'icons/icon32.png',
+              'icons/icon48.png',
+              'icons/icon128.png',
+              'README.md',
+              'LICENSE'
+          ]
+
+          with zipfile.ZipFile('dist/sidekiq-queue-kill-switch.zip', 'r') as z:
+              zip_contents = z.namelist()
+
+              missing = []
+              for req in required_files:
+                  if req not in zip_contents:
+                      missing.append(req)
+
+              if missing:
+                  print("::error::ZIP is missing required files:")
+                  for f in missing:
+                      print(f"  - {f}")
+                  sys.exit(1)
+
+          print("✓ ZIP contains all required files")
+          EOF
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidekiq-queue-kill-switch-ci-${{ github.sha }}
+          path: dist/sidekiq-queue-kill-switch.zip
+          retention-days: 7

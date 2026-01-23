@@ -120,7 +120,12 @@ sidekiq-queue-kill-switch/
 │   ├── icon48.png
 │   └── icon128.png
 ├── scripts/
-│   └── package.sh         # Build script for distribution
+│   ├── package.sh         # Build script for distribution
+│   └── validate-version.py # Version validation for releases
+├── .github/workflows/
+│   ├── ci.yml             # PR/push validation
+│   └── release.yml        # Tag-triggered releases
+├── Makefile               # Build automation
 ├── README.md
 └── LICENSE
 ```
@@ -160,6 +165,64 @@ This extension requires minimal permissions:
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.
+
+## CI/CD
+
+This project uses GitHub Actions for continuous integration and releases.
+
+### Continuous Integration
+
+On every PR and push to `main`:
+- Validates `manifest.json` structure (MV3, correct URL patterns)
+- Validates `contentScript.js` structure (safety functions, logging prefix)
+- Builds and verifies the extension ZIP
+
+### Automated Releases
+
+Releases are created automatically when you push a version tag.
+
+## Releasing
+
+### Quick Release
+
+```bash
+# 1. Update version in manifest.json
+#    Edit manifest.json and change "version": "1.0.0" to "1.0.1"
+
+# 2. Commit the version bump
+git add manifest.json
+git commit -m "Bump version to 1.0.1"
+
+# 3. Create and push a matching tag
+git tag v1.0.1
+git push origin main --tags
+```
+
+### What Happens
+
+1. GitHub Actions detects the `v*.*.*` tag push
+2. Validates that `manifest.json` version matches the tag (e.g., `v1.0.1` → `1.0.1`)
+3. Builds the extension ZIP using `make package`
+4. Creates a GitHub Release with auto-generated release notes
+5. Attaches `sidekiq-queue-kill-switch.zip` to the release
+
+### Version Matching Rules
+
+- Tag format: `v<major>.<minor>.<patch>` (e.g., `v1.0.1`, `v2.3.0`)
+- Manifest version: `<major>.<minor>.<patch>` (e.g., `1.0.1`, `2.3.0`)
+- The tag (minus the `v` prefix) must exactly match `manifest.json` version
+- Mismatches will fail the release with a clear error message
+
+### Manual Release (Alternative)
+
+If you prefer not to use automated releases:
+
+```bash
+# Build locally
+make package
+
+# Create release manually on GitHub and upload dist/sidekiq-queue-kill-switch.zip
+```
 
 ## Contributing
 
