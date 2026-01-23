@@ -81,15 +81,17 @@ jobs:
 
           python3 << 'EOF'
           import sys
+          import re
 
           with open('src/contentScript.js', 'r') as f:
               content = f.read()
 
           errors = []
 
-          # Check LOG_PREFIX constant exists with [SQKS]
-          if "LOG_PREFIX = '[SQKS]'" not in content and 'LOG_PREFIX = "[SQKS]"' not in content:
-              errors.append("LOG_PREFIX constant with '[SQKS]' value not found")
+          # Check LOG_PREFIX constant exists with [SQKS] (handles const/let/var declarations)
+          log_prefix_pattern = r"(const|let|var)\s+LOG_PREFIX\s*=\s*['\"]\[SQKS\]['\"]"
+          if not re.search(log_prefix_pattern, content):
+              errors.append("LOG_PREFIX constant not found (expected: const|let|var LOG_PREFIX = '[SQKS]';)")
 
           # Check key safety functions exist
           required_functions = [

@@ -37,15 +37,16 @@ Sidekiq UI has eventual consistency - queue state may not update immediately aft
 The extension handles this with a verification + retry loop:
 - After each pass, re-fetches page HTML to check which queues still need action
 - Retries remaining queues up to MAX_PASSES (5)
-- PASS_DELAY_MS (750ms) between passes to let server state settle
-- POST_DELAY_MS (150ms) between individual requests
+- Jittered delay between passes (1500-3500ms) to let server state settle
+- Jittered delay between individual requests (250-900ms)
+- Error backoff with jitter (2000-4000ms) after failed requests
 
 ### Safety Rules
 1. **Never send delete parameter** - Multiple guards at every level
 2. **ALLOWED_ACTIONS allowlist** - Only 'pause' and 'unpause' permitted
 3. **Read button state from DOM** - Don't hardcode pause/unpause values
-4. **Use page's CSRF token** - Read from each form's hidden input
-5. **Rate limit requests** - 150ms delay between POSTs
+4. **Use page's CSRF token** - Read from each form's hidden input + X-CSRF-Token header
+5. **Rate limit requests** - Jittered delays (250-900ms) between POSTs
 
 ### Console Logging
 All logs prefixed with `[SQKS]` for easy filtering in DevTools.
