@@ -40,6 +40,8 @@
   const REQUEST_REDIRECT = 'manual';
   const INLINE_SCRIPT_SCAN_LIMIT = 200000;
   const TOKEN_PATTERN = /^[A-Za-z0-9+/_=-]{20,200}$/;
+  const NATIVE_FORM_ACTIONS = ['pause', 'unpause'];
+  const IFRAME_SUBMIT_TIMEOUT_MS = 6000;
 
   // Allowed action types - explicit allowlist for safety
   const ALLOWED_ACTIONS = ['pause', 'unpause'];
@@ -53,6 +55,7 @@
   ];
 
   let bulkActionInProgress = false;
+  let currentRun = null;
 
   /**
    * Sleep helper
@@ -83,18 +86,21 @@
     if (DEBUG_LEVEL >= 1) {
       console.log(LOG_PREFIX, ...args);
     }
+    appendRunLog('info', args);
   }
 
   function logVerbose(...args) {
     if (DEBUG_LEVEL >= 2) {
       console.log(LOG_PREFIX, ...args);
     }
+    appendRunLog('debug', args);
   }
 
   function logError(...args) {
     if (DEBUG_LEVEL >= 1) {
       console.error(LOG_PREFIX, ...args);
     }
+    appendRunLog('error', args);
   }
 
   function tokenPrefix(token) {
@@ -109,6 +115,100 @@
     } catch (e) {
       return action;
     }
+  }
+
+  function ensureHiddenIframe() {
+    let iframe = document.querySelector('iframe[name="sqks_target"]');
+    if (!iframe) {
+      iframe = document.createElement('iframe');
+      iframe.name = 'sqks_target';
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+    }
+    return iframe;
+  }
+
+  function findLiveFormForQueue(actionPathKey, actionType) {
+    const forms = document.querySelectorAll('form[action*="/sidekiq/queues/"]');
+    for (const form of forms) {
+      const action = form.getAttribute('action') || '';
+      if (normalizeActionPathKey(action) !== actionPathKey) {
+        continue;
+      }
+      const submitButton = findSubmitButton(form, actionType);
+      return { form, submitButton };
+    }
+    return null;
+  }
+
+  async function submitViaNativeForm(queueInfo, actionType) {
+    const live = findLiveFormForQueue(queueInfo.actionPathKey, actionType);
+    if (!live) {
+      return { ok: false, mode: 'native', reason: 'form_missing', hasQueuesTable: false };
+    }
+
+    const { form, submitButton } = live;
+    if (!submitButton) {
+      return { ok: false, mode: 'native', reason: 'submit_missing', hasQueuesTable: false };
+    }
+
+    const iframe = ensureHiddenIframe();
+    const originalTarget = form.getAttribute('target');
+    form.setAttribute('target', 'sqks_target');
+
+    const waitForLoad = new Promise((resolve) => {
+      const onLoad = () => {
+        iframe.removeEventListener('load', onLoad);
+        resolve(true);
+      };
+      iframe.addEventListener('load', onLoad, { once: true });
+      setTimeout(() => {
+        iframe.removeEventListener('load', onLoad);
+        resolve(false);
+      }, IFRAME_SUBMIT_TIMEOUT_MS);
+    });
+
+    try {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit(submitButton);
+      } else {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = submitButton.getAttribute('name');
+        hidden.value = submitButton.getAttribute('value') || hidden.name;
+        form.appendChild(hidden);
+        form.submit();
+        hidden.remove();
+      }
+    } catch (error) {
+      if (originalTarget) {
+        form.setAttribute('target', originalTarget);
+      } else {
+        form.removeAttribute('target');
+      }
+      return { ok: false, mode: 'native', reason: 'submit_error', error: String(error), hasQueuesTable: false };
+    }
+
+    const loaded = await waitForLoad;
+    if (originalTarget) {
+      form.setAttribute('target', originalTarget);
+    } else {
+      form.removeAttribute('target');
+    }
+
+    let hasQueuesTable = false;
+    let loginPage = false;
+    try {
+      const doc = iframe.contentDocument;
+      if (doc) {
+        hasQueuesTable = !!doc.querySelector('table.queues');
+        loginPage = looksLikeLoginPageFromDoc(doc);
+      }
+    } catch (e) {
+      // Ignore iframe access errors
+    }
+
+    return { ok: loaded && !loginPage, mode: 'native', hasQueuesTable, loginPage, reason: loaded ? 'loaded' : 'timeout' };
   }
 
   function looksLikeLoginPageFromText(htmlText) {
@@ -197,6 +297,92 @@
     redacted = redacted.replace(/(window\._csrf\s*=\s*["'])([^"']+)/gi, '$1[REDACTED]');
     redacted = redacted.replace(/(window\.csrfToken\s*=\s*["'])([^"']+)/gi, '$1[REDACTED]');
     return redacted;
+  }
+
+  function sanitizeValue(value) {
+    if (typeof value === 'string') {
+      const redacted = redactSecrets(value);
+      if (isTokenLike(redacted)) {
+        return tokenPrefix(redacted);
+      }
+      return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
+    }
+    if (value && typeof value === 'object') {
+      if (value instanceof Error) {
+        return { message: value.message, stack: value.stack };
+      }
+      return value;
+    }
+    return value;
+  }
+
+  function sanitizeData(data) {
+    if (!data) return null;
+    try {
+      return JSON.parse(JSON.stringify(data, (key, value) => {
+        if (/token/i.test(key)) {
+          if (typeof value === 'string') return tokenPrefix(value);
+        }
+        return sanitizeValue(value);
+      }));
+    } catch (e) {
+      return { value: String(data) };
+    }
+  }
+
+  function appendRunLog(level, args) {
+    if (!currentRun) return;
+    const items = Array.from(args || []);
+    let data = null;
+    if (items.length > 0 && typeof items[items.length - 1] === 'object') {
+      data = items.pop();
+    }
+    const message = items.map(item => String(item)).join(' ');
+    currentRun.logs.push({
+      ts: new Date().toISOString(),
+      level,
+      message,
+      data: sanitizeData(data),
+    });
+  }
+
+  function startRun(actionType, meta) {
+    const id = `${actionType}-${Date.now()}`;
+    currentRun = {
+      id,
+      actionType,
+      startedAt: new Date().toISOString(),
+      pageUrl: window.location.href,
+      meta: meta || {},
+      logs: [],
+      refreshes: [],
+      submissions: [],
+      results: null,
+    };
+    return currentRun;
+  }
+
+  function endRun(results) {
+    if (!currentRun) return;
+    currentRun.endedAt = new Date().toISOString();
+    currentRun.results = results || null;
+    downloadRunLog(currentRun);
+    currentRun = null;
+  }
+
+  function downloadRunLog(run) {
+    try {
+      const payload = JSON.stringify(run, null, 2);
+      const blob = new Blob([payload], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sqks-run-${run.id}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.error(LOG_PREFIX, 'Failed to download run log', e);
+    }
   }
 
   /**
@@ -381,6 +567,17 @@
       `[${contextLabel}] GET status=${response.status} loginPage=${loginPage} table.queues=${hasQueuesTable}`,
       `headerCsrf=${tokenSource}:${tokenPrefix(headerToken)}`
     );
+    if (currentRun) {
+      currentRun.refreshes.push({
+        ts: new Date().toISOString(),
+        label: contextLabel,
+        status: response.status,
+        loginPage,
+        hasQueuesTable,
+        headerCsrfSource: tokenSource,
+        headerCsrfPrefix: tokenPrefix(headerToken),
+      });
+    }
     if (!response.ok) {
       logError(`[${contextLabel}] GET non-OK status=${response.status}`);
     }
@@ -460,6 +657,7 @@
         formToken,             // For POST body authenticity_token param
         submitName,
         submitValue: submitValue || submitName, // Fallback to name if value missing
+        actionType,
       });
     }
 
@@ -651,7 +849,17 @@
       logVerbose(`[${attemptLabel}] bodySnippet="${bodySnippet}"`);
     }
 
-    return { ok, status: response.status, is403, bodySnippet, headers: respHeaders, loginPage, diagKind, hasQueuesTable };
+    return {
+      ok,
+      status: response.status,
+      is403,
+      bodySnippet,
+      headers: respHeaders,
+      loginPage,
+      diagKind,
+      hasQueuesTable,
+      requestMode,
+    };
   }
 
   /**
@@ -667,8 +875,73 @@
       throw new Error('SAFETY: Refusing to submit delete action');
     }
 
+    const useNativeForm = NATIVE_FORM_ACTIONS.includes(queueInfo.actionType);
+    let res;
+
+    if (useNativeForm) {
+      const nativeRes = await submitViaNativeForm(queueInfo, queueInfo.actionType);
+      logVerbose(
+        `[native] ${queueInfo.actionType} ${queueName} mode=${nativeRes.mode} reason=${nativeRes.reason} hasQueuesTable=${nativeRes.hasQueuesTable}`
+      );
+      if (currentRun) {
+        currentRun.submissions.push({
+          ts: new Date().toISOString(),
+          queueName,
+          actionType: queueInfo.actionType,
+          actionPath: url.pathname,
+          requestMode: 'native',
+          request: {
+            method: 'POST',
+            body: {
+              authenticity_token_prefix: tokenPrefix(formToken),
+              submitName,
+              submitValue,
+            },
+          },
+          response: {
+            status: nativeRes.ok ? 200 : 0,
+            loginPage: nativeRes.loginPage || false,
+            hasQueuesTable: nativeRes.hasQueuesTable || false,
+            reason: nativeRes.reason,
+          },
+        });
+      }
+      if (nativeRes.loginPage) {
+        return { ok: false, status: 200, is403: false, bodySnippet: '', loginPage: true, diagKind: 'LOGIN', hasQueuesTable: nativeRes.hasQueuesTable };
+      }
+      if (nativeRes.ok) {
+        return { ok: true, status: 200, is403: false, bodySnippet: '', loginPage: false, diagKind: 'NONE', hasQueuesTable: nativeRes.hasQueuesTable };
+      }
+    }
+
     const requestMode = csrfContext.headerToken ? 'xhr' : 'form';
-    const res = await doQueuePost(url, formToken, submitName, submitValue, csrfContext, 'attempt', requestMode);
+    res = await doQueuePost(url, formToken, submitName, submitValue, csrfContext, 'attempt', requestMode);
+    if (currentRun) {
+      currentRun.submissions.push({
+        ts: new Date().toISOString(),
+        queueName,
+        actionType: queueInfo.actionType,
+        actionPath: url.pathname,
+        requestMode: res.requestMode,
+        request: {
+          method: 'POST',
+          body: {
+            authenticity_token_prefix: tokenPrefix(formToken),
+            submitName,
+            submitValue,
+          },
+        },
+        response: {
+          status: res.status,
+          location: res.headers ? res.headers.location : null,
+          contentType: res.headers ? res.headers.contentType : null,
+          xRequestId: res.headers ? res.headers.xRequestId : null,
+          diagKind: res.diagKind,
+          loginPage: res.loginPage,
+          hasQueuesTable: res.hasQueuesTable,
+        },
+      });
+    }
 
     if (!res.ok) {
       // Enhanced diagnostics for failures
@@ -680,6 +953,7 @@
         responseHeaders: res.headers,
         bodySnippet: res.bodySnippet,
         diagKind: res.diagKind,
+        submissionMode: res.requestMode || 'fetch',
       };
 
       if (res.is403) {
@@ -1045,12 +1319,15 @@
     statusElement.textContent = `${actionLabel}ing...`;
     statusElement.className = 'sqks-status sqks-status-progress';
     bulkActionInProgress = true;
+    startRun(actionType, { totalQueues, initialActionable: initialActionable.length });
 
+    let finalResults = null;
     try {
       const results = await convergeQueues(
         actionType,
         (msg) => { statusElement.textContent = msg; }
       );
+      finalResults = results;
 
       // Build result message
       let resultMessage;
@@ -1086,9 +1363,11 @@
       logError('Bulk action failed:', error);
       statusElement.textContent = `Error: ${error.message}`;
       statusElement.className = 'sqks-status sqks-status-error';
+      finalResults = { error: String(error.message || error) };
     } finally {
       buttons.forEach(btn => btn.disabled = false);
       bulkActionInProgress = false;
+      endRun(finalResults);
     }
   }
 
