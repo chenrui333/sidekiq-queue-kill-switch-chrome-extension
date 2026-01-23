@@ -7,6 +7,7 @@ A Chrome extension (Manifest V3) that adds **Pause All** and **Unpause All** con
 - **Pause All Queues**: Stops all queue processing with a single click
 - **Unpause All Queues**: Resumes all paused queues
 - **Safe**: Never deletes queues - only pauses/unpauses
+- **Reliable convergence**: Uses verification loop to handle eventual consistency
 - **Confirmation dialogs**: Prevents accidental mass actions
 - **Progress tracking**: Shows real-time status during operations
 - **Works with Arc/Chrome**: Any Chromium-based browser
@@ -62,11 +63,12 @@ During operation:
 The extension:
 
 1. Detects the Sidekiq Queues page by looking for `table.queues`
-2. Enumerates all queue forms in the table
-3. For each queue, submits the same POST request that the Pause/Unpause button would send
+2. Enumerates all queue forms that need action (have pause/unpause button)
+3. For each queue, submits the same POST request that the button would send
 4. Uses the page's authenticity token (CSRF protection)
 5. Rate-limits requests (150ms delay) to avoid server overload
-6. Refreshes the page to show updated state
+6. **Verifies and retries**: Re-fetches page state and retries any queues that didn't change (up to 5 passes) to handle Sidekiq's eventual consistency
+7. Refreshes the page to show updated state
 
 ### Safety Features
 
@@ -103,6 +105,18 @@ The extension:
 - The page should auto-refresh after completion
 - If not, manually refresh to see updated state
 - Check server logs for any backend errors
+
+### Status shows "Incomplete after X passes"
+
+This happens when some queues don't reach the desired state after multiple attempts:
+
+- The extension performs up to 5 passes to handle Sidekiq's eventual consistency
+- Between passes, it re-fetches the page to verify which queues still need action
+- If queues remain unchanged after 5 passes:
+  - Check the browser console (`[SQKS]` prefix) for detailed error logs
+  - The queue may have permission restrictions
+  - There may be server-side validation preventing the action
+  - Try pausing/unpausing those specific queues manually
 
 ## Development
 

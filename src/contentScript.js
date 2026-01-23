@@ -3,14 +3,29 @@
  *
  * Adds "Pause All" and "Unpause All" controls to the Sidekiq Enterprise Queues page.
  * Safe for oncall use - never deletes queues, only pauses/unpauses.
+ *
+ * Uses a convergence loop to handle Sidekiq UI eventual consistency:
+ * - After each pass, re-fetches page state to verify which queues still need action
+ * - Retries until all queues reach desired state or max passes reached
  */
 
 (function() {
   'use strict';
 
   const LOG_PREFIX = '[SQKS]';
-  const DELAY_BETWEEN_REQUESTS_MS = 150;
-  const MAX_CONCURRENT_REQUESTS = 3;
+  const POST_DELAY_MS = 150;      // Delay between individual POST requests
+  const PASS_DELAY_MS = 750;      // Delay between passes to let server state settle
+  const MAX_PASSES = 5;           // Maximum convergence attempts
+
+  // Allowed action types - explicit allowlist for safety
+  const ALLOWED_ACTIONS = ['pause', 'unpause'];
+
+  /**
+   * Sleep helper
+   */
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
 
   /**
    * Log helper with consistent prefix
@@ -54,29 +69,15 @@
   }
 
   /**
-   * Get all queue forms from the table
-   */
-  function getQueueForms() {
-    const table = document.querySelector('table.queues');
-    if (!table) {
-      return [];
-    }
-
-    const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
-    return Array.from(forms);
-  }
-
-  /**
    * Extract queue name from form action URL
    */
-  function getQueueName(form) {
-    const action = form.getAttribute('action') || '';
+  function getQueueNameFromAction(action) {
     const match = action.match(/\/sidekiq\/queues\/([^/?]+)/);
     return match ? decodeURIComponent(match[1]) : 'unknown';
   }
 
   /**
-   * Get the authenticity token from a form
+   * Get the authenticity token from a form element
    */
   function getAuthenticityToken(form) {
     const tokenInput = form.querySelector('input[name="authenticity_token"]');
@@ -84,31 +85,31 @@
   }
 
   /**
-   * Find a submit button by action type (pause/unpause)
+   * Find a submit button by action type (pause/unpause) in a form element
    * Detects from DOM - does not hardcode values
+   * Returns null if no matching button found
    */
   function findSubmitButton(form, actionType) {
-    // Look for submit inputs with name matching the action type
+    // SAFETY: Only allow known action types
+    if (!ALLOWED_ACTIONS.includes(actionType)) {
+      logError(`Invalid action type: ${actionType}`);
+      return null;
+    }
+
     const submits = form.querySelectorAll('input[type="submit"]');
 
     for (const submit of submits) {
       const name = (submit.getAttribute('name') || '').toLowerCase();
       const value = (submit.getAttribute('value') || '').toLowerCase();
 
-      // Skip delete buttons - SAFETY CHECK
+      // SAFETY: Explicitly reject delete buttons
       if (name === 'delete' || value === 'delete') {
         continue;
       }
 
-      // Match pause or unpause based on name or value
-      if (actionType === 'pause') {
-        if (name === 'pause' || value === 'pause') {
-          return submit;
-        }
-      } else if (actionType === 'unpause') {
-        if (name === 'unpause' || value === 'unpause') {
-          return submit;
-        }
+      // SAFETY: Only match if name or value exactly equals the action type
+      if (name === actionType || value === actionType) {
+        return submit;
       }
     }
 
@@ -116,21 +117,86 @@
   }
 
   /**
-   * Submit a form action via fetch
+   * Fetch the queues page and parse it into a document
+   * Returns a parsed Document for querying fresh DOM state
    */
-  async function submitFormAction(form, submitButton) {
-    const action = form.getAttribute('action');
-    const url = new URL(action, window.location.origin);
-    const token = getAuthenticityToken(form);
+  async function fetchQueuesPageDocument() {
+    const response = await fetch(window.location.href, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: {
+        'Accept': 'text/html',
+      },
+    });
 
-    if (!token) {
-      throw new Error('No authenticity token found');
+    if (!response.ok) {
+      throw new Error(`Failed to fetch page: HTTP ${response.status}`);
     }
 
-    const submitName = submitButton.getAttribute('name');
-    const submitValue = submitButton.getAttribute('value');
+    const html = await response.text();
+    const parser = new DOMParser();
+    return parser.parseFromString(html, 'text/html');
+  }
 
-    // SAFETY: Double-check we're not submitting a delete
+  /**
+   * Get actionable queue forms from a document (live DOM or fetched)
+   * Returns array of { queueName, form, action, token, submitName, submitValue }
+   * for queues that still need the specified action
+   */
+  function getActionableQueues(doc, actionType) {
+    const table = doc.querySelector('table.queues');
+    if (!table) {
+      return [];
+    }
+
+    const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
+    const actionable = [];
+
+    for (const form of forms) {
+      const action = form.getAttribute('action');
+      const queueName = getQueueNameFromAction(action);
+      const submitButton = findSubmitButton(form, actionType);
+
+      // If no submit button for this action, queue is already in desired state
+      if (!submitButton) {
+        continue;
+      }
+
+      const token = getAuthenticityToken(form);
+      if (!token) {
+        logError(`No authenticity token for queue: ${queueName}`);
+        continue;
+      }
+
+      const submitName = submitButton.getAttribute('name');
+      const submitValue = submitButton.getAttribute('value');
+
+      // SAFETY: Final check - reject delete
+      if (submitName.toLowerCase() === 'delete') {
+        logError(`SAFETY: Skipping delete button for queue: ${queueName}`);
+        continue;
+      }
+
+      actionable.push({
+        queueName,
+        action,
+        token,
+        submitName,
+        submitValue,
+      });
+    }
+
+    return actionable;
+  }
+
+  /**
+   * Submit an action for a single queue
+   */
+  async function submitQueueAction(queueInfo) {
+    const { queueName, action, token, submitName, submitValue } = queueInfo;
+    const url = new URL(action, window.location.origin);
+
+    // SAFETY: Final guard against delete
     if (submitName.toLowerCase() === 'delete') {
       throw new Error('SAFETY: Refusing to submit delete action');
     }
@@ -139,7 +205,7 @@
     body.append('authenticity_token', token);
     body.append(submitName, submitValue);
 
-    log(`Submitting ${submitName}=${submitValue} to ${url.pathname}`);
+    log(`Submitting ${submitName}=${submitValue} to ${url.pathname} (${queueName})`);
 
     const response = await fetch(url.toString(), {
       method: 'POST',
@@ -161,48 +227,99 @@
   }
 
   /**
-   * Process forms with rate limiting
+   * Convergence loop: keep processing until all queues reach desired state
+   * or max passes reached
    */
-  async function processFormsWithRateLimit(forms, actionType, updateStatus) {
+  async function convergeQueues(actionType, updateStatus) {
     const results = {
-      success: 0,
-      skipped: 0,
-      failed: 0,
+      totalProcessed: 0,
+      passesUsed: 0,
+      success: false,
       errors: [],
+      remainingQueues: [],
     };
 
-    const total = forms.length;
-    let processed = 0;
+    const actionLabel = actionType === 'pause' ? 'Pausing' : 'Unpausing';
+    const doneLabel = actionType === 'pause' ? 'paused' : 'unpaused';
 
-    // Process sequentially with delay for safety and predictability
-    for (const form of forms) {
-      const queueName = getQueueName(form);
-      const submitButton = findSubmitButton(form, actionType);
+    for (let pass = 1; pass <= MAX_PASSES; pass++) {
+      results.passesUsed = pass;
 
-      if (!submitButton) {
-        log(`Skipping ${queueName}: no ${actionType} button found`);
-        results.skipped++;
-        processed++;
-        updateStatus(`${actionType === 'pause' ? 'Pausing' : 'Unpausing'} ${processed}/${total}... (skipped ${queueName})`);
-        continue;
+      // Fetch fresh page state (except first pass where we use live DOM)
+      let doc;
+      if (pass === 1) {
+        doc = document;
+        log(`Pass ${pass}/${MAX_PASSES}: Using live DOM`);
+      } else {
+        log(`Pass ${pass}/${MAX_PASSES}: Fetching fresh page state...`);
+        updateStatus(`Pass ${pass}/${MAX_PASSES}: Checking remaining queues...`);
+        try {
+          doc = await fetchQueuesPageDocument();
+        } catch (error) {
+          logError(`Failed to fetch page state:`, error);
+          // Fall back to live DOM
+          doc = document;
+        }
       }
 
+      // Get queues that still need action
+      const actionable = getActionableQueues(doc, actionType);
+
+      if (actionable.length === 0) {
+        log(`Pass ${pass}/${MAX_PASSES}: All queues ${doneLabel}!`);
+        updateStatus(`All queues ${doneLabel}`);
+        results.success = true;
+        results.remainingQueues = [];
+        break;
+      }
+
+      log(`Pass ${pass}/${MAX_PASSES}: ${actionable.length} queues need ${actionType}`);
+      updateStatus(`Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${actionable.length} remaining...`);
+
+      // Process each actionable queue
+      for (let i = 0; i < actionable.length; i++) {
+        const queueInfo = actionable[i];
+        const progressMsg = `Pass ${pass}/${MAX_PASSES}: ${actionLabel} ${i + 1}/${actionable.length} (${queueInfo.queueName})`;
+        updateStatus(progressMsg);
+
+        try {
+          await submitQueueAction(queueInfo);
+          results.totalProcessed++;
+          log(`Success: ${actionType} ${queueInfo.queueName}`);
+        } catch (error) {
+          results.errors.push({ queue: queueInfo.queueName, error: error.message, pass });
+          logError(`Failed to ${actionType} ${queueInfo.queueName}:`, error);
+        }
+
+        // Delay between requests (except after last one)
+        if (i < actionable.length - 1) {
+          await sleep(POST_DELAY_MS);
+        }
+      }
+
+      // If not the last pass, wait for server state to settle before re-checking
+      if (pass < MAX_PASSES) {
+        log(`Waiting ${PASS_DELAY_MS}ms for server state to settle...`);
+        await sleep(PASS_DELAY_MS);
+      }
+    }
+
+    // Final check if we exhausted all passes
+    if (!results.success) {
+      log(`Checking final state after ${MAX_PASSES} passes...`);
       try {
-        await submitFormAction(form, submitButton);
-        results.success++;
-        log(`Success: ${actionType} ${queueName}`);
+        const finalDoc = await fetchQueuesPageDocument();
+        const remaining = getActionableQueues(finalDoc, actionType);
+        results.remainingQueues = remaining.map(q => q.queueName);
+
+        if (remaining.length === 0) {
+          results.success = true;
+          log('All queues reached desired state after final check');
+        } else {
+          logError(`Incomplete: ${remaining.length} queues still not ${doneLabel}:`, results.remainingQueues);
+        }
       } catch (error) {
-        results.failed++;
-        results.errors.push({ queue: queueName, error: error.message });
-        logError(`Failed to ${actionType} ${queueName}:`, error);
-      }
-
-      processed++;
-      updateStatus(`${actionType === 'pause' ? 'Pausing' : 'Unpausing'} ${processed}/${total}...`);
-
-      // Delay between requests
-      if (processed < total) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS_MS));
+        logError('Failed to perform final state check:', error);
       }
     }
 
@@ -210,22 +327,41 @@
   }
 
   /**
+   * Count total queues on the page
+   */
+  function getTotalQueueCount() {
+    const table = document.querySelector('table.queues');
+    if (!table) return 0;
+    return table.querySelectorAll('form[action*="/sidekiq/queues/"]').length;
+  }
+
+  /**
    * Main action handler for pause/unpause all
    */
   async function handleBulkAction(actionType, statusElement, buttons) {
-    const forms = getQueueForms();
+    const totalQueues = getTotalQueueCount();
 
-    if (forms.length === 0) {
+    if (totalQueues === 0) {
       statusElement.textContent = 'No queues found';
       statusElement.className = 'sqks-status sqks-status-error';
       return;
     }
 
-    // Confirmation dialog
+    // Get initial actionable count
+    const initialActionable = getActionableQueues(document, actionType);
     const actionLabel = actionType === 'pause' ? 'Pause' : 'Unpause';
+    const doneLabel = actionType === 'pause' ? 'paused' : 'unpaused';
+
+    if (initialActionable.length === 0) {
+      statusElement.textContent = `All ${totalQueues} queues already ${doneLabel}`;
+      statusElement.className = 'sqks-status sqks-status-success';
+      return;
+    }
+
+    // Confirmation dialog
     const confirmMessage = actionType === 'pause'
-      ? `Pause all ${forms.length} queues? This will stop all queue processing until unpaused.`
-      : `Unpause all ${forms.length} queues?`;
+      ? `Pause ${initialActionable.length} queue(s)? This will stop queue processing until unpaused.`
+      : `Unpause ${initialActionable.length} queue(s)?`;
 
     if (!confirm(confirmMessage)) {
       statusElement.textContent = 'Cancelled';
@@ -235,33 +371,36 @@
 
     // Disable buttons during operation
     buttons.forEach(btn => btn.disabled = true);
-    statusElement.textContent = `${actionLabel}ing 0/${forms.length}...`;
+    statusElement.textContent = `${actionLabel}ing...`;
     statusElement.className = 'sqks-status sqks-status-progress';
 
     try {
-      const results = await processFormsWithRateLimit(
-        forms,
+      const results = await convergeQueues(
         actionType,
         (msg) => { statusElement.textContent = msg; }
       );
 
-      // Show results
-      let resultMessage = `Done: ${results.success} ${actionType}d`;
-      if (results.skipped > 0) {
-        resultMessage += `, ${results.skipped} skipped`;
+      // Build result message
+      let resultMessage;
+      if (results.success) {
+        resultMessage = `Done: All queues ${doneLabel}`;
+        if (results.passesUsed > 1) {
+          resultMessage += ` (${results.passesUsed} passes)`;
+        }
+        statusElement.className = 'sqks-status sqks-status-success';
+      } else {
+        resultMessage = `Incomplete after ${results.passesUsed} passes: ${results.remainingQueues.length} queue(s) still not ${doneLabel}`;
+        statusElement.className = 'sqks-status sqks-status-error';
+        logError('Remaining queues:', results.remainingQueues);
       }
-      if (results.failed > 0) {
-        resultMessage += `, ${results.failed} failed`;
+
+      if (results.errors.length > 0) {
+        resultMessage += ` (${results.errors.length} error(s))`;
+        logError('Errors during processing:', results.errors);
       }
 
       statusElement.textContent = resultMessage;
-      statusElement.className = results.failed > 0
-        ? 'sqks-status sqks-status-error'
-        : 'sqks-status sqks-status-success';
-
-      if (results.errors.length > 0) {
-        logError('Errors:', results.errors);
-      }
+      log(`Final results:`, results);
 
       // Refresh page after a brief delay to show the status
       setTimeout(() => {

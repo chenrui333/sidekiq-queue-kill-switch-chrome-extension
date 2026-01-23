@@ -32,11 +32,20 @@ Chrome Extension (Manifest V3) that adds "Pause All" and "Unpause All" controls 
 - Unpause button: `input[type="submit"][name="unpause"]`
 - Delete button: `input[type="submit"][name="delete"]` (NEVER use)
 
+### Convergence Loop
+Sidekiq UI has eventual consistency - queue state may not update immediately after POST.
+The extension handles this with a verification + retry loop:
+- After each pass, re-fetches page HTML to check which queues still need action
+- Retries remaining queues up to MAX_PASSES (5)
+- PASS_DELAY_MS (750ms) between passes to let server state settle
+- POST_DELAY_MS (150ms) between individual requests
+
 ### Safety Rules
-1. **Never send delete parameter** - Code has multiple guards against this
-2. **Read button state from DOM** - Don't hardcode pause/unpause values
-3. **Use page's CSRF token** - Read from each form's hidden input
-4. **Rate limit requests** - 150ms delay between POSTs
+1. **Never send delete parameter** - Multiple guards at every level
+2. **ALLOWED_ACTIONS allowlist** - Only 'pause' and 'unpause' permitted
+3. **Read button state from DOM** - Don't hardcode pause/unpause values
+4. **Use page's CSRF token** - Read from each form's hidden input
+5. **Rate limit requests** - 150ms delay between POSTs
 
 ### Console Logging
 All logs prefixed with `[SQKS]` for easy filtering in DevTools.
