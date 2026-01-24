@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2025-01-24
+
+### Changed
+- Updated extension icons with new design
+
 ## [1.5.0] - 2025-01-24
 
 ### Added
