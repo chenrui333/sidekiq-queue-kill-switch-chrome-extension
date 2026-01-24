@@ -106,29 +106,93 @@ This happens when some queues don't reach the desired state after multiple attem
 
 ## Development
 
+### Prerequisites
+
+- [Bun](https://bun.sh/) (for dependency management and build)
+- Node.js 18+ (for build scripts)
+
 ### Project Structure
 
 ```
 sidekiq-queue-kill-switch/
-├── manifest.json          # Chrome extension manifest (v3)
+├── manifest.json              # Chrome extension manifest (source - refs src/)
 ├── src/
-│   ├── contentScript.js   # Main extension logic
-│   └── contentScript.css  # Styling for controls
-├── icons/                 # Extension icons
+│   ├── contentScript.js       # Main extension logic (source)
+│   └── contentScript.css      # Styling for controls
+├── icons/                     # Extension icons
 │   ├── icon16.png
 │   ├── icon32.png
 │   ├── icon48.png
 │   └── icon128.png
 ├── scripts/
-│   ├── package.sh         # Build script for distribution
-│   └── validate-version.py # Version validation for releases
+│   ├── bench-build.sh         # Build performance benchmarks
+│   ├── build-extension.mjs    # Extension assembly script
+│   ├── package.sh             # Build script for distribution
+│   └── validate-version.py    # Version validation for releases
 ├── .github/workflows/
-│   ├── ci.yml             # PR/push validation
-│   └── release.yml        # Tag-triggered releases
-├── Makefile               # Build automation
+│   ├── ci.yml                 # PR/push validation
+│   └── release.yml            # Tag-triggered releases
+├── package.json               # Bun/npm dependencies
+├── vite.config.js             # Vite build configuration
+├── Makefile                   # Build automation
 ├── README.md
 └── LICENSE
 ```
+
+### Build Output
+
+After running `make package`, the output is:
+
+```
+dist/
+├── build/                     # Vite build output
+│   └── contentScript.js       # Bundled JS (IIFE format)
+├── extension/                 # Assembled extension (load unpacked here)
+│   ├── manifest.json          # Generated manifest (refs assets/)
+│   ├── assets/
+│   │   ├── contentScript.js   # Built JS
+│   │   └── contentScript.css  # CSS (copied)
+│   ├── icons/
+│   └── ...
+└── sidekiq-queue-kill-switch.zip
+```
+
+### Building
+
+```bash
+# Install dependencies and build
+make package
+
+# Or step by step:
+bun install              # Install dependencies
+bun run build            # Build JS with Vite
+node scripts/build-extension.mjs  # Assemble extension
+```
+
+### Development Workflow
+
+```bash
+# Watch mode for development
+bun run watch
+
+# After making changes, reload extension:
+# 1. Go to chrome://extensions/
+# 2. Click refresh icon on extension card
+# 3. Reload the Sidekiq page
+```
+
+### Loading the Extension
+
+**For development (Load unpacked):**
+1. Run `make package` (or just `make assemble` for quicker iterations)
+2. Go to `chrome://extensions/`
+3. Enable Developer mode
+4. Click "Load unpacked"
+5. Select `dist/extension/` directory
+
+**From ZIP:**
+1. Run `make package`
+2. Drag `dist/sidekiq-queue-kill-switch.zip` onto `chrome://extensions/`
 
 ### Debug Logging
 
@@ -142,9 +206,10 @@ All console output is prefixed with `[SQKS]` for easy filtering:
 ### Making Changes
 
 1. Edit files in `src/`
-2. Go to `chrome://extensions/`
-3. Click the refresh icon on the extension card
-4. Reload the Sidekiq page to test
+2. Run `make package` (or `bun run watch` for auto-rebuild)
+3. Go to `chrome://extensions/`
+4. Click the refresh icon on the extension card
+5. Reload the Sidekiq page to test
 
 ## Permissions
 

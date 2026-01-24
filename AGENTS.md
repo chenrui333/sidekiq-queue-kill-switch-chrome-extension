@@ -7,15 +7,23 @@ Chrome Extension (Manifest V3) that adds "Pause All" and "Unpause All" controls 
 ## Project Structure
 
 ```
-├── manifest.json          # Chrome MV3 manifest
+├── manifest.json              # Chrome MV3 manifest (source - refs src/)
 ├── src/
-│   ├── contentScript.js   # Main extension logic (injected into page)
-│   └── contentScript.css  # UI styling for injected controls
-├── icons/                 # Extension icons (16/32/48/128px)
+│   ├── contentScript.js       # Main extension logic (source)
+│   └── contentScript.css      # UI styling for injected controls
+├── icons/                     # Extension icons (16/32/48/128px)
 ├── scripts/
-│   └── package.sh         # Shell script for packaging
-├── Makefile               # Build automation
-└── dist/                  # Generated zip output (gitignored)
+│   ├── bench-build.sh         # Build performance benchmarks
+│   ├── build-extension.mjs    # Extension assembly script
+│   ├── package.sh             # Shell script for packaging
+│   └── validate-version.py    # Version validation for releases
+├── package.json               # Bun/npm dependencies
+├── vite.config.js             # Vite build configuration
+├── Makefile                   # Build automation
+└── dist/                      # Build output (gitignored)
+    ├── build/                 # Vite build output
+    ├── extension/             # Assembled extension (load unpacked here)
+    └── *.zip                  # Distribution package
 ```
 
 ## Key Technical Details
@@ -68,17 +76,30 @@ The extension is optimized for pages with many queues (hundreds+):
 ## Development Workflow
 
 ```bash
-# Package extension
+# Install dependencies
+bun install
+
+# Build and package extension
 make package
+
+# Or step by step:
+bun run build              # Build JS with Vite
+node scripts/build-extension.mjs  # Assemble extension
+
+# Watch mode for development
+bun run watch
 
 # Clean build artifacts
 make clean
 
+# Deep clean (includes node_modules)
+make clean-all
+
 # Load in Chrome/Arc
 # 1. chrome://extensions/
 # 2. Enable Developer mode
-# 3. Load unpacked → select project directory
-# 4. After changes: click refresh icon on extension card
+# 3. Load unpacked → select dist/extension/
+# 4. After changes: rebuild and click refresh icon on extension card
 ```
 
 ## Testing
@@ -90,9 +111,24 @@ Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
 4. Page refreshes after completion
 5. Check console for `[SQKS]` logs
 
+## Build System
+
+The extension uses **Bun + Vite** for building:
+- **Vite** bundles `src/contentScript.js` into IIFE format for Chrome content scripts
+- **No minification** by default (enable with `BUILD_MINIFY=1`)
+- CSS is copied as-is (no processing)
+- Manifest is generated with updated asset paths (`src/` → `assets/`)
+
+### Build Output Paths
+- `dist/build/contentScript.js` - Vite bundled JS
+- `dist/extension/` - Assembled extension (load unpacked here)
+- `dist/extension/assets/` - Built JS and CSS
+- `dist/sidekiq-queue-kill-switch.zip` - Distribution package
+
 ## Code Style
 
-- Vanilla JavaScript (no build step, no dependencies)
+- Vanilla JavaScript (no runtime dependencies)
+- Vite for build bundling (IIFE output)
 - IIFE wrapper for isolation
 - Async/await for fetch operations
 - Descriptive function names

@@ -1,5 +1,11 @@
-# Distribution
+# Distribution and build output
 dist/
+
+# Dependencies
+node_modules/
+
+# Bun lockfile (regenerated on install)
+bun.lockb
 
 # macOS
 .DS_Store

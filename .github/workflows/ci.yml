@@ -26,6 +26,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Validate manifest.json structure
         run: |
           echo "Checking manifest.json..."
@@ -139,6 +144,53 @@ jobs:
       - name: Build extension package
         run: make package
 
+      - name: Verify built extension structure
+        run: |
+          echo "Verifying built extension..."
+
+          # Check extension directory was created
+          if [ ! -d "dist/extension" ]; then
+            echo "::error::dist/extension directory not found"
+            exit 1
+          fi
+
+          # Check generated manifest exists
+          if [ ! -f "dist/extension/manifest.json" ]; then
+            echo "::error::Generated manifest.json not found"
+            exit 1
+          fi
+
+          # Verify generated manifest references assets/ paths
+          python3 << 'EOF'
+          import json
+          import sys
+
+          with open('dist/extension/manifest.json', 'r') as f:
+              manifest = json.load(f)
+
+          cs = manifest.get('content_scripts', [{}])[0]
+          js_paths = cs.get('js', [])
+          css_paths = cs.get('css', [])
+
+          errors = []
+
+          if not any('assets/contentScript.js' in p for p in js_paths):
+              errors.append(f"Generated manifest should reference assets/contentScript.js, got: {js_paths}")
+
+          if not any('assets/contentScript.css' in p for p in css_paths):
+              errors.append(f"Generated manifest should reference assets/contentScript.css, got: {css_paths}")
+
+          if errors:
+              print("::error::Generated manifest validation failed:")
+              for error in errors:
+                  print(f"  - {error}")
+              sys.exit(1)
+
+          print("✓ Generated manifest.json references correct asset paths")
+          EOF
+
+          echo "✓ Built extension structure is valid"
+
       - name: Verify ZIP contents
         run: |
           echo "Verifying ZIP contents..."
@@ -152,15 +204,15 @@ jobs:
           # List contents
           unzip -l dist/sidekiq-queue-kill-switch.zip
 
-          # Verify required files are in ZIP
+          # Verify required files are in ZIP (new paths after Vite build)
           python3 << 'EOF'
           import zipfile
           import sys
 
           required_files = [
               'manifest.json',
-              'src/contentScript.js',
-              'src/contentScript.css',
+              'assets/contentScript.js',
+              'assets/contentScript.css',
               'icons/icon16.png',
               'icons/icon32.png',
               'icons/icon48.png',

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2025-01-24
+
+### Added
+- **Bun + Vite build pipeline**: Migrated from no-build-step (zip-only) to modern build tooling
+- **Build performance benchmarks**: `scripts/bench-build.sh` for measuring cold/warm build times
+- **Performance report**: `docs/build-perf.md` documenting build pipeline performance
+- **Minification option**: `BUILD_MINIFY=1 make package` for production-optimized builds
+- **Watch mode**: `bun run watch` for development with auto-rebuild
+- **Toolchain config**: `mise.toml` for reproducible development environment (Bun 1.3, Node 22, Python 3.13)
+
+### Changed
+- **Build output structure**: Assets now in `dist/extension/assets/` (was `src/`)
+- **Manifest paths**: Generated manifest references `assets/contentScript.js` instead of `src/contentScript.js`
+- **CI/CD workflows**: Updated to use Bun for dependency installation and building
+- **JS bundle size**: 16% smaller (46.88 KB vs 56.10 KB) due to Vite bundling
+
+### Technical
+- Vite configured for IIFE output format (Chrome MV3 content script compatible)
+- Deterministic output filenames (no content hashing)
+- Source maps included in development builds
+- ES2020 target for modern browser compatibility
+
 ## [1.4.0] - 2025-01-23
 
 ### Added
