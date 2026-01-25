@@ -113,7 +113,6 @@ This happens when some queues don't reach the desired state after multiple attem
 ### Prerequisites
 
 - [Bun](https://bun.sh/) (for dependency management and build)
-- Node.js 18+ (for build scripts)
 
 ### Project Structure
 
@@ -170,7 +169,7 @@ make package
 # Or step by step:
 bun install              # Install dependencies
 bun run build            # Build JS with Vite
-node scripts/build-extension.mjs  # Assemble extension
+bun scripts/build-extension.mjs  # Assemble extension
 ```
 
 ### Development Workflow

@@ -84,7 +84,7 @@ make package
 
 # Or step by step:
 bun run build              # Build JS with Vite
-node scripts/build-extension.mjs  # Assemble extension
+bun scripts/build-extension.mjs  # Assemble extension
 
 # Watch mode for development
 bun run watch

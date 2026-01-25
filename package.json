@@ -8,13 +8,13 @@
     "build": "vite build",
     "build:minify": "BUILD_MINIFY=1 vite build",
     "watch": "vite build --watch",
-    "assemble": "node scripts/build-extension.mjs",
+    "assemble": "bun scripts/build-extension.mjs",
     "package": "bun run build && bun run assemble"
   },
   "devDependencies": {
     "vite": "^6.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "bun": ">=1.0.0"
   }
 }

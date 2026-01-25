@@ -16,7 +16,7 @@ build: install
 # Assemble extension directory
 assemble: build
 	@echo "Assembling extension..."
-	@node scripts/build-extension.mjs
+	@bun scripts/build-extension.mjs
 
 # Package the extension into a zip file
 package: assemble
