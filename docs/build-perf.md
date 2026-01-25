@@ -132,6 +132,27 @@ The migration to Bun + Vite introduces a build time overhead of ~400-500ms, whic
 
 For this extension (content-script-only, no complex dependencies), the overhead is reasonable and the infrastructure investment enables future improvements.
 
+## Runtime Comparison: Bun vs Node
+
+The `build-extension.mjs` assembly script can run on either Bun or Node. Here's the performance comparison:
+
+### Assembly Script Timing (build-extension.mjs)
+
+| Runtime | Min | Max | Mean | Median |
+|---------|-----|-----|------|--------|
+| Bun | 34.8 ms | 263.7 ms | 101.0 ms | 39.7 ms |
+| Node | 43.9 ms | 108.6 ms | 62.4 ms | 51.4 ms |
+
+**Result**: Bun is ~23% faster (median) but has higher variance. Node is more consistent.
+
+### Why We Use Bun
+
+Despite the variance, we standardized on Bun for:
+1. **Unified toolchain** - One runtime for everything (package management + scripts)
+2. **Faster median** - 23% faster in typical runs
+3. **Future-ready** - Bun's performance continues to improve
+4. **Simpler setup** - No need for both bun and node in `mise.toml`
+
 ## Reproduction
 
 To reproduce these benchmarks:
