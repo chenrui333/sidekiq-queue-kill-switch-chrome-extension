@@ -136,7 +136,7 @@ sidekiq-queue-kill-switch/
 ├── .github/workflows/
 │   ├── ci.yml                 # PR/push validation
 │   └── release.yml            # Tag-triggered releases
-├── package.json               # Bun/npm dependencies
+├── package.json               # Bun dependencies
 ├── vite.config.js             # Vite build configuration
 ├── Makefile                   # Build automation
 ├── README.md

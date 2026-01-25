@@ -17,7 +17,7 @@ Chrome Extension (Manifest V3) that adds "Pause All" and "Unpause All" controls 
 │   ├── build-extension.mjs    # Extension assembly script
 │   ├── package.sh             # Shell script for packaging
 │   └── validate-version.py    # Version validation for releases
-├── package.json               # Bun/npm dependencies
+├── package.json               # Bun dependencies
 ├── vite.config.js             # Vite build configuration
 ├── Makefile                   # Build automation
 └── dist/                      # Build output (gitignored)

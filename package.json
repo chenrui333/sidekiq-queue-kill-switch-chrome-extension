@@ -9,7 +9,7 @@
     "build:minify": "BUILD_MINIFY=1 vite build",
     "watch": "vite build --watch",
     "assemble": "node scripts/build-extension.mjs",
-    "package": "npm run build && npm run assemble"
+    "package": "bun run build && bun run assemble"
   },
   "devDependencies": {
     "vite": "^6.0.0"
