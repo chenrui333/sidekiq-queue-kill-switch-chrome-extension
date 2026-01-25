@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Performance report**: `docs/build-perf.md` documenting build pipeline performance
 - **Minification option**: `BUILD_MINIFY=1 make package` for production-optimized builds
 - **Watch mode**: `bun run watch` for development with auto-rebuild
-- **Toolchain config**: `mise.toml` for reproducible development environment (Bun 1.3, Node 24, Python 3.14)
+- **Toolchain config**: `mise.toml` for reproducible development environment (Bun 1.3, Python 3.14)
 
 ### Changed
 - **Build output structure**: Assets now in `dist/extension/assets/` (was `src/`)
