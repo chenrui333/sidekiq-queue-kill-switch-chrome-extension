@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2025-01-25
+
+### Changed
+- Standardized on Bun-only toolchain (removed all Node.js references)
+- Updated shebang in build scripts to use `#!/usr/bin/env bun`
+- Simplified `mise.toml` to only include Bun and Python
+
+### Added
+- Renovate configuration for automated dependency updates with automerge
+- Extension icon displayed in README
+- Runtime performance comparison (Bun vs Node) in build documentation
+
 ## [1.5.1] - 2025-01-24
 
 ### Changed

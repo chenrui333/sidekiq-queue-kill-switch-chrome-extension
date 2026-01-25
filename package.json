@@ -1,6 +1,6 @@
 {
   "name": "sidekiq-queue-kill-switch",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": true,
   "type": "module",
   "description": "Chrome Extension: Adds Pause All / Unpause All controls to Sidekiq Enterprise Queues page",
