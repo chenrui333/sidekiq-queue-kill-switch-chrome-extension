@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Build Extension Assembly Script
  *
@@ -9,7 +9,7 @@
  * 4. Copies icons, README, LICENSE
  * 5. Generates manifest.json with updated asset paths
  *
- * Usage: node scripts/build-extension.mjs
+ * Usage: bun scripts/build-extension.mjs
  */
 
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'fs';

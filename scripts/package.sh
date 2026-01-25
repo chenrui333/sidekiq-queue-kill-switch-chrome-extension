@@ -6,7 +6,7 @@
 # This script delegates to the Makefile which handles:
 # 1. Installing dependencies (bun install)
 # 2. Building with Vite (bun run build)
-# 3. Assembling extension (node scripts/build-extension.mjs)
+# 3. Assembling extension (bun scripts/build-extension.mjs)
 # 4. Creating the ZIP file
 #
 
