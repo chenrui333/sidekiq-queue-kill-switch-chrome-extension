@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icons/icon128.png" alt="Sidekiq Queue Kill Switch" width="128" height="128">
+</p>
+
 # Sidekiq Queue Kill Switch
 
 A Chrome extension (Manifest V3) that adds **Pause All** and **Unpause All** controls to the Sidekiq Enterprise Queues page. Designed for oncall use.
