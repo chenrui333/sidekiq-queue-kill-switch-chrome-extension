@@ -1,8 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ],
+  "extends": ["config:recommended"],
   "automerge": true,
   "automergeType": "pr",
   "platformAutomerge": true,
@@ -15,6 +13,5 @@
       "matchUpdateTypes": ["major"],
       "automerge": false
     }
-  ],
-  "schedule": ["before 9am on monday"]
+  ]
 }
