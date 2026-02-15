@@ -105,14 +105,28 @@ make clean-all
 ## Release Process
 
 ```bash
-# After committing your release changes on main:
-git push
+# Set target release version
+export VERSION="X.Y.Z"
+
+# Bump manifest version
+python3 - <<'PY'
+import json, pathlib, os
+path = pathlib.Path("manifest.json")
+data = json.loads(path.read_text(encoding="utf-8"))
+data["version"] = os.environ["VERSION"]
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+
+# Commit the version bump on main
+git add manifest.json
+git commit -m "chore(release): bump version to $VERSION"
 
 # Tag the current HEAD
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git tag -a "v$VERSION" -m "Release v$VERSION"
 
 # Push the tag to trigger the release workflow
-git push origin vX.Y.Z
+git push
+git push origin "v$VERSION"
 ```
 
 The repository’s release workflow is configured to run on pushed tags matching `v*.*.*`, and it:
