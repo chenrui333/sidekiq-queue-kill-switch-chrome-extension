@@ -111,6 +111,21 @@ Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
 4. Page refreshes after completion
 5. Check console for `[SQKS]` logs
 
+## Dependency Maintenance
+
+- Renovate configuration is in `.github/renovate.json`.
+- Dependency updates are managed for:
+  - `npm`
+  - `github-actions`
+- Semantic commit messages are configured so Renovate PR/commit titles use `chore(deps): ...`.
+- GitHub Actions are pinned by SHA through Renovate-managed updates.
+- Renovate runs for normal updates on demand, with a 3-day minimum release age, and immediate security updates.
+- Local checks used during this work:
+  - `bun install`
+  - `bunx renovate-config-validator --strict .github/renovate.json`
+  - `bunx renovate --platform=github --token=$RENOVATE_TOKEN chenrui333/sidekiq-queue-kill-switch-chrome-extension --dry-run=full`
+- If Renovate stops creating branches, check for a stray `renovate/*` branch in the repository because Renovate requires branch names with this prefix.
+
 ## Build System
 
 The extension uses **Bun + Vite** for building:
