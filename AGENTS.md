@@ -102,6 +102,24 @@ make clean-all
 # 4. After changes: rebuild and click refresh icon on extension card
 ```
 
+## Release Process
+
+```bash
+# After committing your release changes on main:
+git push
+
+# Tag the current HEAD
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+
+# Push the tag to trigger the release workflow
+git push origin vX.Y.Z
+```
+
+The repository’s release workflow is configured to run on pushed tags matching `v*.*.*`, and it:
+1. validates `manifest.json` version matches the tag,
+2. builds `dist/sidekiq-queue-kill-switch.zip`,
+3. creates a GitHub release with that ZIP attached.
+
 ## Testing
 
 Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
