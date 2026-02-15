@@ -115,7 +115,7 @@ Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
 
 - Renovate configuration is in `.github/renovate.json`.
 - Dependency updates are managed for:
-  - `npm`
+  - `bun` (package.json + `bun.lock`)
   - `github-actions`
 - Semantic commit messages are configured so Renovate PR/commit titles use `chore(deps): ...`.
 - GitHub Actions are pinned by SHA through Renovate-managed updates.
