@@ -4,6 +4,9 @@
 
 # Sidekiq Queue Kill Switch
 
+[![CI](https://github.com/chenrui333/sidekiq-queue-kill-switch-chrome-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/chenrui333/sidekiq-queue-kill-switch-chrome-extension/actions/workflows/ci.yml)
+[![Release](https://github.com/chenrui333/sidekiq-queue-kill-switch-chrome-extension/actions/workflows/release.yml/badge.svg)](https://github.com/chenrui333/sidekiq-queue-kill-switch-chrome-extension/actions/workflows/release.yml)
+
 A Chrome extension (Manifest V3) that adds **Pause All** and **Unpause All** controls to the Sidekiq Enterprise Queues page. Designed for oncall use.
 
 ## Features
