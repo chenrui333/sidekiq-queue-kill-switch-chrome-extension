@@ -113,18 +113,20 @@ export VERSION="X.Y.Z"
 #    - Move items from [Unreleased] into [VERSION - YYYY-MM-DD] (or update/add directly)
 #    - Ensure the entry is complete and accurate
 
-# Bump manifest version
+# Bump release versions (manifest.json and package.json)
 python3 - <<'PY'
 import json, pathlib, os
-path = pathlib.Path("manifest.json")
-data = json.loads(path.read_text(encoding="utf-8"))
-data["version"] = os.environ["VERSION"]
-path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+target_version = os.environ["VERSION"]
+for filename in ("manifest.json", "package.json"):
+    path = pathlib.Path(filename)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["version"] = target_version
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
 
 # Commit the version bump on main
-git add manifest.json
-git commit -m "chore(release): bump version to $VERSION"
+git add manifest.json package.json
+git commit -m "chore(release): bump versions to $VERSION"
 
 # Tag the current HEAD
 git tag -a "v$VERSION" -m "Release v$VERSION"
