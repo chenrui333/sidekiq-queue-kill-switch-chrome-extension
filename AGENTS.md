@@ -102,6 +102,45 @@ make clean-all
 # 4. After changes: rebuild and click refresh icon on extension card
 ```
 
+## Release Process
+
+```bash
+# Set target release version
+export VERSION="X.Y.Z"
+
+# Update changelog
+# 1) Add release notes to CHANGELOG.md:
+#    - Move items from [Unreleased] into [VERSION - YYYY-MM-DD] (or update/add directly)
+#    - Ensure the entry is complete and accurate
+
+# Bump release versions (manifest.json and package.json)
+python3 - <<'PY'
+import json, pathlib, os
+target_version = os.environ["VERSION"]
+for filename in ("manifest.json", "package.json"):
+    path = pathlib.Path(filename)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["version"] = target_version
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+
+# Commit the version bump on main
+git add manifest.json package.json
+git commit -m "chore(release): bump versions to $VERSION"
+
+# Tag the current HEAD
+git tag -a "v$VERSION" -m "Release v$VERSION"
+
+# Push the tag to trigger the release workflow
+git push
+git push origin "v$VERSION"
+```
+
+The repository’s release workflow is configured to run on pushed tags matching `v*.*.*`, and it:
+1. validates `manifest.json` version matches the tag,
+2. builds `dist/sidekiq-queue-kill-switch.zip`,
+3. creates a GitHub release with that ZIP attached.
+
 ## Testing
 
 Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
