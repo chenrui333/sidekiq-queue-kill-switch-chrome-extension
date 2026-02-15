@@ -108,6 +108,11 @@ make clean-all
 # Set target release version
 export VERSION="X.Y.Z"
 
+# Update changelog
+# 1) Add release notes to CHANGELOG.md:
+#    - Move items from [Unreleased] into [VERSION - YYYY-MM-DD] (or update/add directly)
+#    - Ensure the entry is complete and accurate
+
 # Bump manifest version
 python3 - <<'PY'
 import json, pathlib, os
