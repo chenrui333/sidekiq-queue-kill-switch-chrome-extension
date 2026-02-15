@@ -1,0 +1,43 @@
+{
+  "extends": ["config:recommended"],
+  "automerge": true,
+  "automergeStrategy": "merge",
+  "minimumReleaseAge": "3 days",
+  "dependencyDashboard": true,
+  "enabledManagers": ["npm", "github-actions"],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group npm updates to reduce PR volume.",
+      "matchManagers": ["npm"],
+      "groupName": "npm dependencies"
+    },
+    {
+      "description": "Group GitHub Actions updates separately.",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true,
+      "groupName": "github-actions dependencies"
+    },
+    {
+      "description": "Auto-merge all npm and GitHub Actions dependency updates.",
+      "matchManagers": ["npm", "github-actions"],
+      "automerge": true
+    },
+    {
+      "description": "Run security updates immediately and auto-merge.",
+      "matchManagers": ["npm", "github-actions"],
+      "minimumReleaseAge": "0 days",
+      "matchUpdateTypes": ["security"],
+      "schedule": ["at any time"],
+      "groupName": "security dependencies",
+      "automerge": true
+    }
+  ],
+  "schedule": ["before 6:00am on monday"],
+  "timezone": "UTC",
+  "ignorePaths": ["dist/**", "node_modules/**"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6:00am on monday"]
+  }
+}
