@@ -4,6 +4,9 @@
   "automergeStrategy": "merge",
   "minimumReleaseAge": "3 days",
   "dependencyDashboard": true,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
   "enabledManagers": ["npm", "github-actions"],
   "labels": ["dependencies"],
   "packageRules": [
