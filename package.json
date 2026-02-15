@@ -12,7 +12,7 @@
     "package": "bun run build && bun run assemble"
   },
   "devDependencies": {
-    "vite": "^6.0.0"
+    "vite": "^7.0.0"
   },
   "engines": {
     "bun": ">=1.0.0"
