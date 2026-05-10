@@ -126,7 +126,7 @@ PY
 
 # Commit the version bump on main
 git add manifest.json package.json
-git commit -m "chore(release): bump versions to $VERSION"
+git commit -s -m "chore(release): bump versions to $VERSION"
 
 # Tag the current HEAD
 git tag -a "v$VERSION" -m "Release v$VERSION"
@@ -137,13 +137,19 @@ git push origin "v$VERSION"
 ```
 
 The repository’s release workflow is configured to run on pushed tags matching `v*.*.*`, and it:
-1. validates `manifest.json` version matches the tag,
+1. validates `manifest.json` and `package.json` versions match the tag,
 2. builds `dist/sidekiq-queue-kill-switch.zip`,
 3. creates a GitHub release with that ZIP attached.
 
 ## Testing
 
-Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
+Run automated coverage first:
+
+```bash
+bun test
+```
+
+Then manually navigate to a Sidekiq Enterprise queues page and verify:
 1. Controls appear near page header
 2. Confirmation dialogs work
 3. Status updates during operation
@@ -161,7 +167,7 @@ Manual testing only - navigate to a Sidekiq Enterprise queues page and verify:
 - Renovate runs for normal updates on demand, with a 3-day minimum release age, and immediate security updates.
 - Local checks used during this work:
   - `bun install`
-  - `bunx renovate-config-validator --strict .github/renovate.json`
+  - `bunx --package renovate renovate-config-validator --strict .github/renovate.json`
   - `bunx renovate --platform=github --token=$RENOVATE_TOKEN chenrui333/sidekiq-queue-kill-switch-chrome-extension --dry-run=full`
 - If Renovate stops creating branches, check for a stray `renovate/*` branch in the repository because Renovate requires branch names with this prefix.
 

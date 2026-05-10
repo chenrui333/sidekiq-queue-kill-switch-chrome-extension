@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-05-10
+
+### Fixed
+- Preserve pause/unpause actions when Sidekiq renders a separate delete-only form with the same queue action URL.
+- Count queues by unique Sidekiq queue action URL instead of raw form count.
+
+### Added
+- Bun/jsdom coverage for duplicate queue forms, safe fallback submit buttons, and delete-only forms.
+
+### Changed
+- Standardize repo agent guidance on `AGENTS.md` only.
+- Correct release and Renovate validation documentation.
+
 ## [1.5.2] - 2025-01-25
 
 ### Changed

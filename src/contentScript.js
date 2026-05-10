@@ -112,9 +112,43 @@
     perfMetrics = null;
   }
 
+  function createFormIndexEntry(actionPathKey, action) {
+    return {
+      forms: [],
+      form: null,
+      token: null,
+      pauseBtn: null,
+      unpauseBtn: null,
+      pauseForm: null,
+      unpauseForm: null,
+      pauseToken: null,
+      unpauseToken: null,
+      pauseAction: null,
+      unpauseAction: null,
+      hasDelete: false,
+      queueName: getQueueNameFromAction(action),
+      action,
+      actionPathKey,
+    };
+  }
+
+  function formHasDeleteControl(form) {
+    const candidates = form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])');
+    for (const el of candidates) {
+      const name = (el.getAttribute('name') || '').trim().toLowerCase();
+      const value = (el.getAttribute('value') || '').trim().toLowerCase();
+      const text = (el.textContent || '').trim().toLowerCase();
+      if (name.includes('delete') || value.includes('delete') || text.includes('delete')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
-   * Build form index from a document for O(1) lookups
-   * Maps actionPathKey -> { form, token, pauseBtn, unpauseBtn }
+   * Build form index from a document for O(1) lookups.
+   * Multiple forms may share the same Sidekiq queue action URL, so aggregate
+   * the allowed action controls instead of letting a later delete-only form win.
    */
   function buildFormIndex(doc) {
     const start = PERF_ENABLED ? performance.now() : 0;
@@ -133,21 +167,39 @@
       if (!action) continue;
 
       const actionPathKey = normalizeActionPathKey(action);
+      let entry = index.get(actionPathKey);
+      if (!entry) {
+        entry = createFormIndexEntry(actionPathKey, action);
+        index.set(actionPathKey, entry);
+      }
+
       const tokenInput = form.querySelector('input[name="authenticity_token"]');
       const token = tokenInput ? tokenInput.value : null;
+      const pauseBtn = findSubmitButton(form, 'pause');
+      const unpauseBtn = findSubmitButton(form, 'unpause');
+      const hasDelete = formHasDeleteControl(form);
 
-      // Find both pause and unpause buttons for this form
-      const pauseBtn = form.querySelector('input[type="submit"][name="pause"], button[name="pause"]');
-      const unpauseBtn = form.querySelector('input[type="submit"][name="unpause"], button[name="unpause"]');
+      entry.forms.push({ form, token, pauseBtn, unpauseBtn, hasDelete, action });
+      entry.hasDelete = entry.hasDelete || hasDelete;
+      if (!entry.form || pauseBtn || unpauseBtn) {
+        entry.form = form;
+        entry.token = token;
+        entry.action = action;
+      }
 
-      index.set(actionPathKey, {
-        form,
-        token,
-        pauseBtn,
-        unpauseBtn,
-        queueName: getQueueNameFromAction(action),
-        action,
-      });
+      if (pauseBtn && !entry.pauseBtn) {
+        entry.pauseBtn = pauseBtn;
+        entry.pauseForm = form;
+        entry.pauseToken = token;
+        entry.pauseAction = action;
+      }
+
+      if (unpauseBtn && !entry.unpauseBtn) {
+        entry.unpauseBtn = unpauseBtn;
+        entry.unpauseForm = form;
+        entry.unpauseToken = token;
+        entry.unpauseAction = action;
+      }
     }
 
     perfMark('indexBuildTime', PERF_ENABLED ? performance.now() - start : 0);
@@ -228,7 +280,8 @@
     if (entry) {
       perfIncr('formIndexHits');
       const submitButton = actionType === 'pause' ? entry.pauseBtn : entry.unpauseBtn;
-      return { form: entry.form, submitButton };
+      const form = actionType === 'pause' ? entry.pauseForm : entry.unpauseForm;
+      return { form: form || entry.form, submitButton };
     }
 
     perfIncr('formIndexMisses');
@@ -713,14 +766,14 @@
     let formsNoToken = 0;
 
     for (const [actionPathKey, entry] of index) {
-      const { form, token, pauseBtn, unpauseBtn, queueName, action } = entry;
-      const submitButton = actionType === 'pause' ? pauseBtn : unpauseBtn;
+      const queueName = entry.queueName;
+      const submitButton = actionType === 'pause' ? entry.pauseBtn : entry.unpauseBtn;
+      const token = actionType === 'pause' ? entry.pauseToken : entry.unpauseToken;
+      const action = actionType === 'pause' ? entry.pauseAction : entry.unpauseAction;
 
       // If no submit button for this action, queue is already in desired state
       if (!submitButton) {
-        // Check if form has delete but no pause/unpause (for debugging)
-        const hasDelete = form.querySelector('input[name="delete"], button[name="delete"]');
-        if (hasDelete) {
+        if (entry.hasDelete) {
           formsWithDelete++;
         } else {
           formsNoMatchingAction++;
@@ -769,7 +822,7 @@
     }
 
     if (verbose) {
-      logVerbose(`Enumeration: ${index.size} total forms, ${actionable.length} actionable for "${actionType}"`);
+      logVerbose(`Enumeration: ${index.size} total queues, ${actionable.length} actionable for "${actionType}"`);
       logVerbose(`  - Already in desired state: ${formsNoMatchingAction}`);
       logVerbose(`  - Delete-only forms: ${formsWithDelete}`);
       logVerbose(`  - Missing token: ${formsNoToken}`);
@@ -1445,7 +1498,15 @@
   function getTotalQueueCount() {
     const table = document.querySelector('table.queues');
     if (!table) return 0;
-    return table.querySelectorAll('form[action*="/sidekiq/queues/"]').length;
+    const queueActionKeys = new Set();
+    const forms = table.querySelectorAll('form[action*="/sidekiq/queues/"]');
+    for (const form of forms) {
+      const action = form.getAttribute('action');
+      if (action) {
+        queueActionKeys.add(normalizeActionPathKey(action));
+      }
+    }
+    return queueActionKeys.size;
   }
 
   /**
@@ -1617,6 +1678,16 @@
     }
 
     log('Controls injected successfully');
+  }
+
+  if (typeof window !== 'undefined' && window.__SQKS_ENABLE_TEST_EXPORTS__) {
+    window.__SQKS_TEST__ = Object.freeze({
+      buildFormIndex,
+      findSubmitButton,
+      getActionableQueues,
+      getTotalQueueCount,
+      normalizeActionPathKey,
+    });
   }
 
   // Initialize
