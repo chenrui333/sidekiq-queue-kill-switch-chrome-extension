@@ -266,8 +266,9 @@ git add manifest.json package.json CHANGELOG.md
 git commit -s -m "chore(release): bump versions to 1.0.1"
 
 # 3. Create and push a matching tag
-git tag v1.0.1
-git push origin main --tags
+git tag -a v1.0.1 -m "Release v1.0.1"
+git push origin main
+git push origin v1.0.1
 ```
 
 ### What Happens
@@ -275,7 +276,7 @@ git push origin main --tags
 1. GitHub Actions detects the `v*.*.*` tag push
 2. Validates that `manifest.json` and `package.json` versions match the tag (e.g., `v1.0.1` -> `1.0.1`)
 3. Builds the extension ZIP using `make package`
-4. Creates a GitHub Release with auto-generated release notes
+4. Creates a GitHub Release with notes extracted from `CHANGELOG.md`
 5. Attaches `sidekiq-queue-kill-switch.zip` to the release
 
 ### Version Matching Rules

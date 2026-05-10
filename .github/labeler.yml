@@ -1,0 +1,86 @@
+changed-files-labels-limit: 8
+
+bug:
+  - head-branch:
+      - '^fix/'
+
+dependencies:
+  - head-branch:
+      - '^renovate/'
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'bun.lock'
+          - 'package.json'
+          - '.github/renovate.json'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+          - 'AGENTS.md'
+
+type:fix:
+  - head-branch:
+      - '^fix/'
+
+type:chore:
+  - head-branch:
+      - '^chore/'
+      - '^add-'
+      - '^update-'
+
+type:deps:
+  - head-branch:
+      - '^renovate/'
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'bun.lock'
+          - 'package.json'
+          - '.github/renovate.json'
+
+type:docs:
+  - head-branch:
+      - '^docs/'
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+          - 'AGENTS.md'
+
+area:extension:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/**'
+          - 'manifest.json'
+          - 'icons/**'
+
+area:build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Makefile'
+          - 'package.json'
+          - 'bun.lock'
+          - 'vite.config.js'
+          - 'scripts/bench-build.sh'
+          - 'scripts/build-extension.mjs'
+          - 'scripts/package.sh'
+
+area:ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+
+area:release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'CHANGELOG.md'
+          - '.github/workflows/release.yml'
+          - 'scripts/extract-release-notes.py'
+          - 'scripts/validate-version.py'
+
+area:tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'test/**'
+          - '**/*.test.js'

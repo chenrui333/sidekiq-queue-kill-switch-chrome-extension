@@ -124,8 +124,8 @@ for filename in ("manifest.json", "package.json"):
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
 
-# Commit the version bump on main
-git add manifest.json package.json
+# Commit the version bump and release notes on main
+git add manifest.json package.json CHANGELOG.md
 git commit -s -m "chore(release): bump versions to $VERSION"
 
 # Tag the current HEAD
@@ -138,8 +138,9 @@ git push origin "v$VERSION"
 
 The repository’s release workflow is configured to run on pushed tags matching `v*.*.*`, and it:
 1. validates `manifest.json` and `package.json` versions match the tag,
-2. builds `dist/sidekiq-queue-kill-switch.zip`,
-3. creates a GitHub release with that ZIP attached.
+2. extracts release notes from `CHANGELOG.md`,
+3. builds `dist/sidekiq-queue-kill-switch.zip`,
+4. creates a GitHub release with that ZIP attached.
 
 ## Testing
 

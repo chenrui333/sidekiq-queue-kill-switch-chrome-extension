@@ -145,6 +145,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Bulk actions prefer native form submits before fetch/XHR fallback
 
+## [1.1.0] - 2025-01-24
+
+### Added
+- Native form submit mode with hidden iframe target for queue actions
+- HAR parser helper script for request pattern verification
+- Auto-download per-run diagnostics (logs + submission trace)
+
+### Changed
+- Bulk actions prefer native form submits before fetch/XHR fallback
+
 ## [1.0.9] - 2025-01-24
 
 ### Added
@@ -156,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Refresh strategy now rebuilds actionable queues in the same pass after token refresh
 - POST success classifier recognizes form-like 200 responses with queue table
+
 ## [1.0.8] - 2025-01-24
 
 ### Added
