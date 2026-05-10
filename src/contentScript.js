@@ -741,7 +741,7 @@
       logError(`[${contextLabel}] GET non-OK status=${response.status}`);
     }
 
-    return { doc, htmlText: html, loginPage, status: response.status, ok: response.ok, responseHeaders, formIndex };
+    return { doc, htmlText: html, loginPage, hasQueuesTable, status: response.status, ok: response.ok, responseHeaders, formIndex };
   }
 
   /**
@@ -847,6 +847,69 @@
       map.set(q.actionPathKey, q);
     }
     return map;
+  }
+
+  function resolveFreshQueueAfterRefresh(queueInfo, freshDoc, actionType, formIndex = null, hasQueuesTable = true) {
+    if (!hasQueuesTable) {
+      return {
+        canTrust: false,
+        alreadyResolved: false,
+        fresh: null,
+        refreshedActionable: null,
+      };
+    }
+
+    const refreshedActionable = getActionableQueues(freshDoc, actionType, false, formIndex);
+    const fresh = refreshedActionable.find(q => q.actionPathKey === queueInfo.actionPathKey) || null;
+    return {
+      canTrust: true,
+      alreadyResolved: !fresh,
+      fresh,
+      refreshedActionable,
+    };
+  }
+
+  async function verifyQueueSettledAfterRefresh(queueInfo, actionType, contextLabel = 'native-verify') {
+    try {
+      const fetchResult = await fetchQueuesPageDocument(contextLabel);
+      if (fetchResult.loginPage) {
+        return {
+          checked: true,
+          ok: false,
+          loginPage: true,
+          diagKind: 'LOGIN',
+          freshDoc: fetchResult.doc,
+          fetchResult,
+        };
+      }
+
+      const refreshFormIndex = fetchResult.formIndex || (fetchResult.hasQueuesTable ? buildFormIndex(fetchResult.doc) : null);
+      const refreshed = resolveFreshQueueAfterRefresh(
+        queueInfo,
+        fetchResult.doc,
+        actionType,
+        refreshFormIndex,
+        fetchResult.hasQueuesTable
+      );
+
+      return {
+        checked: true,
+        ok: refreshed.canTrust && refreshed.alreadyResolved,
+        loginPage: false,
+        diagKind: refreshed.canTrust ? 'REFRESH_VERIFIED' : 'REFRESH_UNVERIFIED',
+        freshDoc: fetchResult.doc,
+        refreshed,
+        fetchResult,
+      };
+    } catch (error) {
+      return {
+        checked: false,
+        ok: false,
+        loginPage: false,
+        diagKind: 'REFRESH_FAILED',
+        error,
+      };
+    }
   }
 
   /**
@@ -1089,6 +1152,41 @@
           freshDoc: nativeRes.doc,
           freshDocSource: 'iframe',
         };
+      }
+      if (nativeRes.reason === 'loaded') {
+        const verified = await verifyQueueSettledAfterRefresh(queueInfo, effectiveActionType);
+        if (verified.loginPage) {
+          return {
+            ok: false,
+            status: 200,
+            is403: false,
+            bodySnippet: '',
+            loginPage: true,
+            diagKind: 'LOGIN',
+            hasQueuesTable: verified.fetchResult ? verified.fetchResult.hasQueuesTable : false,
+            freshDoc: verified.freshDoc,
+            freshDocSource: 'refresh',
+          };
+        }
+        if (verified.ok) {
+          logVerbose(`[native] verified ${queueName} reached desired state after refresh`);
+          return {
+            ok: true,
+            status: 200,
+            is403: false,
+            bodySnippet: '',
+            loginPage: false,
+            diagKind: 'REFRESH_VERIFIED',
+            hasQueuesTable: verified.fetchResult ? verified.fetchResult.hasQueuesTable : false,
+            freshDoc: verified.freshDoc,
+            freshDocSource: 'refresh',
+          };
+        }
+        if (verified.checked) {
+          logVerbose(`[native] refresh verification kept ${queueName} unresolved diag=${verified.diagKind}`);
+        } else {
+          logVerbose(`[native] refresh verification failed for ${queueName}:`, verified.error);
+        }
       }
       if (nativeRes.forbidden) {
         return {
@@ -1385,36 +1483,49 @@
                 // Build form index for fresh doc
                 const refreshFormIndex = fetchResult.formIndex || buildFormIndex(freshDoc);
 
-                // Retry this queue with fresh tokens (if still actionable)
-                const freshMap = buildQueueTokenMap(freshDoc, actionType, refreshFormIndex);
-                const fresh = freshMap.get(queueInfo.actionPathKey);
-                if (fresh) {
-                  queueInfo.formToken = fresh.formToken;
-                }
-                const retryResult = await submitQueueAction(queueInfo, csrfContext, actionType);
-                if (retryResult.ok) {
+                const refreshed = resolveFreshQueueAfterRefresh(
+                  queueInfo,
+                  freshDoc,
+                  actionType,
+                  refreshFormIndex,
+                  fetchResult.hasQueuesTable
+                );
+
+                if (refreshed.canTrust && refreshed.alreadyResolved) {
                   results.totalProcessed++;
-                  results.stats.retrySuccessCount++;
-                  logVerbose(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
+                  logVerbose(`✓ ${actionType} ${queueInfo.queueName} (already resolved after refresh)`);
                   alreadySucceededKeys.add(queueInfo.actionPathKey);
-                } else if (retryResult.is403 && (retryResult.loginPage || retryResult.diagKind === 'LOGIN')) {
-                  results.aborted = true;
-                  results.abortReason = 'Session expired / not authorized (login page detected after retry)';
-                  logError(results.abortReason);
-                  break;
                 } else {
-                  // Still failed after refresh - likely RBAC, not CSRF
-                  results.errors.push({
-                    queue: queueInfo.queueName,
-                    error: `HTTP ${retryResult.status} after token refresh (likely RBAC/permission)`,
-                    pass
-                  });
-                  logError(`Still failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
+                  const fresh = refreshed.fresh;
+                  if (fresh) {
+                    queueInfo.formToken = fresh.formToken;
+                  }
+                  const retryResult = await submitQueueAction(queueInfo, csrfContext, actionType);
+                  if (retryResult.ok) {
+                    results.totalProcessed++;
+                    results.stats.retrySuccessCount++;
+                    logVerbose(`✓ ${actionType} ${queueInfo.queueName} (after token refresh)`);
+                    alreadySucceededKeys.add(queueInfo.actionPathKey);
+                  } else if (retryResult.is403 && (retryResult.loginPage || retryResult.diagKind === 'LOGIN')) {
+                    results.aborted = true;
+                    results.abortReason = 'Session expired / not authorized (login page detected after retry)';
+                    logError(results.abortReason);
+                    break;
+                  } else {
+                    // Still failed after refresh - likely RBAC, not CSRF
+                    results.errors.push({
+                      queue: queueInfo.queueName,
+                      error: `HTTP ${retryResult.status} after token refresh (likely RBAC/permission)`,
+                      pass
+                    });
+                    logError(`Still failed after refresh: ${queueInfo.queueName} - HTTP ${retryResult.status}`);
+                  }
                 }
 
                 // Rebuild actionable list after refresh to reduce drift (reuse form index)
-                actionable = getActionableQueues(freshDoc, actionType, false, refreshFormIndex)
-                  .filter(q => !alreadySucceededKeys.has(q.actionPathKey));
+                const refreshedActionable = refreshed.refreshedActionable
+                  || getActionableQueues(freshDoc, actionType, false, refreshFormIndex);
+                actionable = refreshedActionable.filter(q => !alreadySucceededKeys.has(q.actionPathKey));
                 invalidateFormIndexCache();
                 i = -1;
               } catch (refreshErr) {
@@ -1687,6 +1798,9 @@
       getActionableQueues,
       getTotalQueueCount,
       normalizeActionPathKey,
+      resolveFreshQueueAfterRefresh,
+      submitQueueAction,
+      verifyQueueSettledAfterRefresh,
     });
   }
 

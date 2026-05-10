@@ -1,12 +1,14 @@
 .PHONY: all clean package build assemble install help
 
+BUN_INSTALL_FLAGS ?=
+
 # Default target
 all: package
 
 # Install dependencies
 install:
 	@echo "Installing dependencies with bun..."
-	@bun install
+	@bun install $(BUN_INSTALL_FLAGS)
 
 # Build with Vite
 build: install
@@ -58,6 +60,7 @@ help:
 	@echo "  make clean       - Remove build artifacts"
 	@echo "  make clean-all   - Remove build artifacts and node_modules"
 	@echo "  make help        - Show this help message"
+	@echo "  BUN_INSTALL_FLAGS=--frozen-lockfile - Pass install flags to bun"
 	@echo ""
 	@echo "Development:"
 	@echo "  bun run watch    - Watch mode for development"

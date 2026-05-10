@@ -27,13 +27,6 @@ export default defineConfig({
       fileName: () => 'contentScript.js',
     },
 
-    rollupOptions: {
-      output: {
-        // No code splitting for content scripts
-        inlineDynamicImports: true,
-      },
-    },
-
     // Generate sourcemaps for debugging (disabled in minified builds)
     sourcemap: !shouldMinify,
 
