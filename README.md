@@ -212,10 +212,11 @@ All console output is prefixed with `[SQKS]` for easy filtering:
 ### Making Changes
 
 1. Edit files in `src/`
-2. Run `make package` (or `bun run watch` for auto-rebuild)
-3. Go to `chrome://extensions/`
-4. Click the refresh icon on the extension card
-5. Reload the Sidekiq page to test
+2. Run `bun test`
+3. Run `make package` (or `bun run watch` for auto-rebuild)
+4. Go to `chrome://extensions/`
+5. Click the refresh icon on the extension card
+6. Reload the Sidekiq page to test
 
 ## Permissions
 
@@ -257,12 +258,12 @@ Releases are created automatically when you push a version tag.
 ### Quick Release
 
 ```bash
-# 1. Update version in manifest.json
-#    Edit manifest.json and change "version": "1.0.0" to "1.0.1"
+# 1. Update version in manifest.json and package.json
+#    Edit both files and change "version": "1.0.0" to "1.0.1"
 
 # 2. Commit the version bump
-git add manifest.json
-git commit -m "Bump version to 1.0.1"
+git add manifest.json package.json CHANGELOG.md
+git commit -s -m "chore(release): bump versions to 1.0.1"
 
 # 3. Create and push a matching tag
 git tag v1.0.1
@@ -272,7 +273,7 @@ git push origin main --tags
 ### What Happens
 
 1. GitHub Actions detects the `v*.*.*` tag push
-2. Validates that `manifest.json` version matches the tag (e.g., `v1.0.1` → `1.0.1`)
+2. Validates that `manifest.json` and `package.json` versions match the tag (e.g., `v1.0.1` -> `1.0.1`)
 3. Builds the extension ZIP using `make package`
 4. Creates a GitHub Release with auto-generated release notes
 5. Attaches `sidekiq-queue-kill-switch.zip` to the release
@@ -280,8 +281,8 @@ git push origin main --tags
 ### Version Matching Rules
 
 - Tag format: `v<major>.<minor>.<patch>` (e.g., `v1.0.1`, `v2.3.0`)
-- Manifest version: `<major>.<minor>.<patch>` (e.g., `1.0.1`, `2.3.0`)
-- The tag (minus the `v` prefix) must exactly match `manifest.json` version
+- Manifest and package version: `<major>.<minor>.<patch>` (e.g., `1.0.1`, `2.3.0`)
+- The tag (minus the `v` prefix) must exactly match both versions
 - Mismatches will fail the release with a clear error message
 
 ### Manual Release (Alternative)
