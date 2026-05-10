@@ -8,6 +8,7 @@ const originalGlobals = {
   confirm: globalThis.confirm,
   document: globalThis.document,
   DOMParser: globalThis.DOMParser,
+  fetch: globalThis.fetch,
   performance: globalThis.performance,
   window: globalThis.window,
 };
@@ -129,4 +130,144 @@ test('does not treat delete-only forms as pause or unpause actions', async () =>
   expect(sqks.getActionableQueues(document, 'pause', false, index)).toEqual([]);
   expect(sqks.getActionableQueues(document, 'unpause', false, index)).toEqual([]);
   expect(sqks.getTotalQueueCount()).toBe(1);
+});
+
+test('verifies an ambiguous native iframe load as success when refresh shows the queue resolved', async () => {
+  const sqks = await loadContentScript(buildPage(`
+    <tr>
+      <td>
+        <form action="/sidekiq/queues/default" method="post">
+          <input type="hidden" name="authenticity_token" value="pause-token">
+          <input type="submit" name="pause" value="Pause">
+        </form>
+      </td>
+    </tr>
+  `));
+
+  globalThis.fetch = async () => new Response(buildPage(`
+    <tr>
+      <td>
+        <form action="/sidekiq/queues/default" method="post">
+          <input type="hidden" name="authenticity_token" value="unpause-token">
+          <input type="submit" name="unpause" value="Unpause">
+        </form>
+      </td>
+    </tr>
+  `), {
+    headers: { 'content-type': 'text/html' },
+    status: 200,
+  });
+
+  const queueInfo = {
+    actionPathKey: '/sidekiq/queues/default',
+    queueName: 'default',
+  };
+  const result = await sqks.verifyQueueSettledAfterRefresh(queueInfo, 'pause', 'test-native-verify');
+
+  expect(result.ok).toBe(true);
+  expect(result.diagKind).toBe('REFRESH_VERIFIED');
+  expect(result.refreshed).toMatchObject({
+    canTrust: true,
+    alreadyResolved: true,
+  });
+});
+
+test('does not verify ambiguous native load when refresh still shows the action button', async () => {
+  const sqks = await loadContentScript(buildPage(''));
+  globalThis.fetch = async () => new Response(buildPage(`
+    <tr>
+      <td>
+        <form action="/sidekiq/queues/default" method="post">
+          <input type="hidden" name="authenticity_token" value="fresh-token">
+          <input type="submit" name="pause" value="Pause">
+        </form>
+      </td>
+    </tr>
+  `), {
+    headers: { 'content-type': 'text/html' },
+    status: 200,
+  });
+
+  const result = await sqks.verifyQueueSettledAfterRefresh({
+    actionPathKey: '/sidekiq/queues/default',
+    queueName: 'default',
+  }, 'pause', 'test-native-verify');
+
+  expect(result.ok).toBe(false);
+  expect(result.refreshed.canTrust).toBe(true);
+  expect(result.refreshed.alreadyResolved).toBe(false);
+  expect(result.refreshed.fresh).toMatchObject({
+    formToken: 'fresh-token',
+    submitName: 'pause',
+  });
+});
+
+test('does not skip retry decisions from an untrusted refresh document', async () => {
+  const sqks = await loadContentScript(buildPage(''));
+  const errorDoc = new DOMParser().parseFromString('<html><body>Service unavailable</body></html>', 'text/html');
+
+  const result = sqks.resolveFreshQueueAfterRefresh({
+    actionPathKey: '/sidekiq/queues/default',
+    queueName: 'default',
+  }, errorDoc, 'pause', null, false);
+
+  expect(result).toMatchObject({
+    canTrust: false,
+    alreadyResolved: false,
+    fresh: null,
+    refreshedActionable: null,
+  });
+});
+
+test('submitQueueAction accepts refresh-verified success after an ambiguous native iframe response', async () => {
+  const sqks = await loadContentScript(buildPage(`
+    <tr>
+      <td>
+        <form action="/sidekiq/queues/default" method="post">
+          <input type="hidden" name="authenticity_token" value="pause-token">
+          <input type="submit" name="pause" value="Pause">
+        </form>
+      </td>
+    </tr>
+  `));
+
+  document.querySelector('form').requestSubmit = () => {
+    const iframe = document.querySelector('iframe[name="sqks_target"]');
+    iframe.contentDocument.body.innerHTML = '<p>Forbidden without queues table</p>';
+    iframe.dispatchEvent(new window.Event('load'));
+  };
+
+  globalThis.fetch = async () => new Response(buildPage(`
+    <tr>
+      <td>
+        <form action="/sidekiq/queues/default" method="post">
+          <input type="hidden" name="authenticity_token" value="unpause-token">
+          <input type="submit" name="unpause" value="Unpause">
+        </form>
+      </td>
+    </tr>
+  `), {
+    headers: { 'content-type': 'text/html' },
+    status: 200,
+  });
+
+  const result = await sqks.submitQueueAction({
+    action: '/sidekiq/queues/default',
+    actionPathKey: '/sidekiq/queues/default',
+    actionType: 'pause',
+    formToken: 'pause-token',
+    queueName: 'default',
+    submitName: 'pause',
+    submitValue: 'Pause',
+  }, {
+    headerToken: null,
+    tokenSource: 'missing',
+  }, 'pause');
+
+  expect(result).toMatchObject({
+    ok: true,
+    status: 200,
+    diagKind: 'REFRESH_VERIFIED',
+    freshDocSource: 'refresh',
+  });
 });

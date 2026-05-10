@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-05-10
+
+### Fixed
+- Verify ambiguous native iframe submissions with a safe page refresh before retrying a queue action.
+- Skip token-refresh retries when the refreshed queues page already shows the target queue in the desired state.
+- Remove the Vite 8 ignored `inlineDynamicImports` warning from builds.
+
+### Changed
+- Use frozen Bun installs for CI and release package builds.
+- Update release workflow wording to reflect manifest and package version validation.
+
 ## [1.5.3] - 2026-05-10
 
 ### Fixed

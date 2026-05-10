@@ -148,7 +148,7 @@ jobs:
         run: bun test
 
       - name: Build extension package
-        run: make package
+        run: make package BUN_INSTALL_FLAGS=--frozen-lockfile
 
       - name: Verify built extension structure
         run: |

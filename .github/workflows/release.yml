@@ -1,7 +1,7 @@
 # Release workflow for Sidekiq Queue Kill Switch Chrome Extension
 #
-# Triggered on version tags (v*.*.*). Validates manifest version matches tag,
-# builds the extension ZIP, and creates a GitHub Release with the asset attached.
+# Triggered on version tags (v*.*.*). Validates manifest and package versions
+# match the tag, builds the extension ZIP, and creates a GitHub Release with the asset attached.
 #
 # Uses softprops/action-gh-release for release creation because:
 # - Single action handles release creation + asset upload
@@ -44,12 +44,12 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION from tag: $TAG"
 
-      - name: Validate manifest version matches tag
+      - name: Validate package versions match tag
         run: |
           python3 scripts/validate-version.py "${{ steps.version.outputs.version }}"
 
       - name: Build extension package
-        run: make package
+        run: make package BUN_INSTALL_FLAGS=--frozen-lockfile
 
       - name: Verify ZIP was created
         run: |
