@@ -1,0 +1,33 @@
+# Applies repository labels to pull requests based on branch names and changed files.
+# This workflow intentionally avoids checkout because pull_request_target has write access.
+
+name: Pull Request Labeler
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  label:
+    name: Label Pull Request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Apply labels
+        uses: actions/labeler@f27b608878404679385c85cfa523b85ccb86e213 # v6.1.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+          sync-labels: 'false'

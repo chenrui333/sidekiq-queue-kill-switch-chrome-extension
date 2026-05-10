@@ -5,7 +5,7 @@
 #
 # Uses softprops/action-gh-release for release creation because:
 # - Single action handles release creation + asset upload
-# - Native support for generate_release_notes
+# - Native support for changelog-derived release bodies via body_path
 # - Well-maintained and widely used
 # - Simpler than gh CLI for asset attachment
 
@@ -48,6 +48,10 @@ jobs:
         run: |
           python3 scripts/validate-version.py "${{ steps.version.outputs.version }}"
 
+      - name: Extract release notes
+        run: |
+          python3 scripts/extract-release-notes.py "${{ steps.version.outputs.version }}" "$RUNNER_TEMP/release-notes.md"
+
       - name: Build extension package
         run: make package BUN_INSTALL_FLAGS=--frozen-lockfile
 
@@ -72,7 +76,7 @@ jobs:
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           name: ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
           files: dist/sidekiq-queue-kill-switch.zip
           fail_on_unmatched_files: true
         env:
